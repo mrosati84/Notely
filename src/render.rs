@@ -8,16 +8,39 @@ use tiny_skia::{
 use crate::annotation::Annotation;
 
 /// Render the base image together with every annotation into a new RGBA image.
-pub fn render(base: &RgbaImage, annotations: &[Annotation], font: Option<&FontRef<'static>>) -> RgbaImage {
+///
+/// `skip` excludes the annotation at that index, which the UI uses to hide the
+/// annotation currently being dragged (it is drawn as an egui overlay instead).
+pub fn render(
+    base: &RgbaImage,
+    annotations: &[Annotation],
+    font: Option<&FontRef<'static>>,
+    skip: Option<usize>,
+) -> RgbaImage {
     let mut buf = base.clone();
+    let keep = |i: usize| skip != Some(i);
 
-    // 1. Pixel-level effects first: blur and spotlight.
-    for a in annotations {
-        match a {
-            Annotation::Blur { rect, sigma } => apply_blur(&mut buf, *rect, *sigma),
-            Annotation::Spot { center, radius } => apply_spot(&mut buf, *center, *radius),
-            _ => {}
+    // 1. Pixel-level effects. Blurs are applied first, then every spotlight in
+    //    a single pass: doing them one at a time lets overlapping spotlights
+    //    darken one another (and the shared background) multiple times.
+    let spots: Vec<(Pos2, f32)> = annotations
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| keep(*i))
+        .filter_map(|(_, a)| match a {
+            Annotation::Spot { center, radius } => Some((*center, *radius)),
+            _ => None,
+        })
+        .collect();
+    for (i, a) in annotations.iter().enumerate() {
+        if keep(i) {
+            if let Annotation::Blur { rect, sigma } = a {
+                apply_blur(&mut buf, *rect, *sigma);
+            }
         }
+    }
+    if !spots.is_empty() {
+        apply_spots(&mut buf, &spots);
     }
 
     let mut pixmap = match image_to_pixmap(&buf) {
@@ -26,14 +49,20 @@ pub fn render(base: &RgbaImage, annotations: &[Annotation], font: Option<&FontRe
     };
 
     // 2. Highlighter strokes go underneath the crisp vector shapes.
-    for a in annotations {
+    for (i, a) in annotations.iter().enumerate() {
+        if !keep(i) {
+            continue;
+        }
         if let Annotation::Highlight { points, color, width } = a {
             draw_highlight(&mut pixmap, points, *color, *width);
         }
     }
 
     // 3. Vector shapes and text.
-    for a in annotations {
+    for (i, a) in annotations.iter().enumerate() {
+        if !keep(i) {
+            continue;
+        }
         match a {
             Annotation::Arrow { from, to, color, width } => {
                 draw_arrow(&mut pixmap, *from, *to, *color, *width);
@@ -68,25 +97,66 @@ fn apply_blur(buf: &mut RgbaImage, rect: Rect, sigma: f32) {
     imageops::replace(buf, &blurred, x as i64, y as i64);
 }
 
-fn apply_spot(buf: &mut RgbaImage, center: Pos2, radius: f32) {
+/// Dim everything outside the given spotlights in a single pass.
+///
+/// A pixel is dimmed by the "brightest" spot it belongs to (the maximum lit
+/// factor across all spots), so multiple spotlights never darken one another
+/// and the shared background is dimmed exactly once, independent of order.
+fn apply_spots(buf: &mut RgbaImage, spots: &[(Pos2, f32)]) {
     let (w, h) = buf.dimensions();
-    if radius <= 0.0 {
+    if w == 0 || h == 0 {
         return;
     }
-    let feather = (radius * 0.35).max(1.0);
-    let inner = radius;
-    let outer = radius + feather;
     let dim = 0.30_f32;
+
+    struct Spot {
+        cx: f32,
+        cy: f32,
+        inner: f32,
+        feather: f32,
+        outer: f32,
+    }
+    let spots: Vec<Spot> = spots
+        .iter()
+        .filter(|(_, radius)| *radius > 0.0)
+        .map(|(center, radius)| {
+            let feather = (*radius * 0.35).max(1.0);
+            Spot {
+                cx: center.x,
+                cy: center.y,
+                inner: *radius,
+                feather,
+                outer: *radius + feather,
+            }
+        })
+        .collect();
+    if spots.is_empty() {
+        return;
+    }
+
     for y in 0..h {
         for x in 0..w {
-            let dx = x as f32 + 0.5 - center.x;
-            let dy = y as f32 + 0.5 - center.y;
-            let d = (dx * dx + dy * dy).sqrt();
-            if d <= inner {
+            let fx = x as f32 + 0.5;
+            let fy = y as f32 + 0.5;
+            let mut f = dim;
+            for s in &spots {
+                let dx = fx - s.cx;
+                let dy = fy - s.cy;
+                let d = (dx * dx + dy * dy).sqrt();
+                let lit = if d <= s.inner {
+                    1.0
+                } else if d >= s.outer {
+                    dim
+                } else {
+                    1.0 - (1.0 - dim) * ((d - s.inner) / s.feather)
+                };
+                if lit > f {
+                    f = lit;
+                }
+            }
+            if f >= 1.0 {
                 continue;
             }
-            let t = if d >= outer { 1.0 } else { (d - inner) / feather };
-            let f = 1.0 - (1.0 - dim) * t;
             let px = buf.get_pixel_mut(x, y);
             px[0] = (px[0] as f32 * f) as u8;
             px[1] = (px[1] as f32 * f) as u8;
@@ -362,9 +432,32 @@ mod tests {
             Annotation::Text { pos: pos2(60.0, 320.0), text: "Hello Notely".to_owned(), color: [255, 255, 255, 255], size: 30.0 },
         ];
 
-        let out = render(&base(), &anns, font.as_ref());
+        let out = render(&base(), &anns, font.as_ref(), None);
         assert_eq!(out.dimensions(), (520, 360));
         out.save(std::env::temp_dir().join("notely_render_test.png")).unwrap();
+    }
+
+    #[test]
+    fn overlapping_spotlights_dim_once() {
+        let mut img = RgbaImage::new(200, 100);
+        for px in img.pixels_mut() {
+            *px = image::Rgba([200, 200, 200, 255]);
+        }
+        // Radius 30, centres 40 px apart: each centre lies inside the *other*
+        // spot's feathered falloff, which used to dim it below full brightness.
+        let anns = vec![
+            Annotation::Spot { center: pos2(80.0, 50.0), radius: 30.0 },
+            Annotation::Spot { center: pos2(120.0, 50.0), radius: 30.0 },
+        ];
+        let out = render(&img, &anns, None, None);
+        // Shared background dimmed exactly once (0.30), not twice (0.09).
+        let d = 200.0 * 0.30;
+        let bg = out.get_pixel(5, 5)[0] as f32;
+        assert!((bg - d).abs() <= 2.0, "background {bg} should be {d}");
+        // Both centres and the overlap region stay fully lit despite the other spot.
+        assert_eq!(out.get_pixel(80, 50)[0], 200);
+        assert_eq!(out.get_pixel(120, 50)[0], 200);
+        assert_eq!(out.get_pixel(100, 50)[0], 200);
     }
 
     #[test]
@@ -376,7 +469,7 @@ mod tests {
                 color: [0, 0, 0, 255],
                 width: 4.0,
             }];
-            let out = render(&base(), &anns, None);
+            let out = render(&base(), &anns, None, None);
             assert_eq!(out.dimensions(), (520, 360));
         }
     }

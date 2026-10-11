@@ -10,6 +10,8 @@ issue it is credited to **Both**.
   which were then cross-checked against the source and the dependency sources
   (`egui-winit 0.31.1`, `tiny-skia 0.11.4`, `ecolor 0.31.1`) before merging.
 - **Result:** 21 unique findings (3 High, 12 Medium, 6 Low).
+- **Status:** All High and Medium findings are resolved (marked ✅ Done below);
+  the Low findings remain open.
 
 ## Summary
 
@@ -18,18 +20,18 @@ issue it is credited to **Both**.
 | 1 | High | ✅ Done — Short arrows panic the renderer (`clamp` with inverted bounds) | `render.rs:156-163` | Codex |
 | 2 | High | ✅ Done — Delete/undo during a move-drag panics or corrupts annotations | `app.rs:323-350`, `372-408` | Claude |
 | 3 | High | ✅ Done — `Cmd/Ctrl+V` paste shortcut never fires | `app.rs:319`, `335-337` | Claude |
-| 4 | Medium | Semi-transparent colors render darkened (premultiplied fed as straight alpha) | `app.rs:447,769`; `render.rs:111-116,194` | Claude |
-| 5 | Medium | Multiple spotlights darken each other and the background repeatedly | `render.rs:14-21`, `71-96` | Both |
-| 6 | Medium | JPEG export drops alpha without compositing (transparency → black) | `app.rs:246-251` | Both |
-| 7 | Medium | Saving with no/unknown extension fails instead of defaulting to PNG | `app.rs:246-251` | Claude |
-| 8 | Medium | No image-size validation: OOM, GPU texture limit, 0×0 → NaN | `app.rs:106-120`, `196-201`, `610-616` | Both |
-| 9 | Medium | Move-drag re-renders and re-uploads the whole image every frame | `app.rs:386-399`, `191-205`; `render.rs:11-55` | Both |
-| 10 | Medium | Unbounded, deep-cloning undo/redo history | `app.rs:160-177`, `341`, `376` | Both |
-| 11 | Medium | No-op selection drag wipes redo history | `app.rs:372-407` | Both |
-| 12 | Medium | Delete/Backspace clears everything and ignores widget focus | `app.rs:298`, `312-350` | Claude |
-| 13 | Medium | Switching tools mid-drag strands drag/move state | `app.rs:287-292`, `370-416` | Claude |
-| 14 | Medium | Clipboard copy may not persist on Linux (arboard dropped) | `app.rs:226` | Claude |
-| 15 | Medium | DMG is signed after bundling / advertised path may not exist | `scripts/package.sh:6-14` | Both |
+| 4 | Medium | ✅ Done — Semi-transparent colors render darkened (premultiplied fed as straight alpha) | `app.rs:447,769`; `render.rs:111-116,194` | Claude |
+| 5 | Medium | ✅ Done — Multiple spotlights darken each other and the background repeatedly | `render.rs:14-21`, `71-96` | Both |
+| 6 | Medium | ✅ Done — JPEG export drops alpha without compositing (transparency → black) | `app.rs:246-251` | Both |
+| 7 | Medium | ✅ Done — Saving with no/unknown extension fails instead of defaulting to PNG | `app.rs:246-251` | Claude |
+| 8 | Medium | ✅ Done — No image-size validation: OOM, GPU texture limit, 0×0 → NaN | `app.rs:106-120`, `196-201`, `610-616` | Both |
+| 9 | Medium | ✅ Done — Move-drag re-renders and re-uploads the whole image every frame | `app.rs:386-399`, `191-205`; `render.rs:11-55` | Both |
+| 10 | Medium | ✅ Done — Unbounded, deep-cloning undo/redo history | `app.rs:160-177`, `341`, `376` | Both |
+| 11 | Medium | ✅ Done — No-op selection drag wipes redo history | `app.rs:372-407` | Both |
+| 12 | Medium | ✅ Done — Delete/Backspace clears everything and ignores widget focus | `app.rs:298`, `312-350` | Claude |
+| 13 | Medium | ✅ Done — Switching tools mid-drag strands drag/move state | `app.rs:287-292`, `370-416` | Claude |
+| 14 | Medium | ✅ Done — Clipboard copy may not persist on Linux (arboard dropped) | `app.rs:226` | Claude |
+| 15 | Medium | ✅ Done — DMG is signed after bundling / advertised path may not exist | `scripts/package.sh:6-14` | Both |
 | 16 | Low | Degenerate rectangles/ellipses committed but invisible | `app.rs:458-467` | Codex |
 | 17 | Low | Canvas padding accepts out-of-bounds annotations | `app.rs:592-636` | Codex |
 | 18 | Low | Arrow shaft overshoots the arrowhead tip; preview differs | `render.rs:146-178`; `app.rs:666-667` | Claude |
@@ -119,6 +121,9 @@ issue it is credited to **Both**.
 - **Recommendation:** Store/convert with `self.color.to_srgba_unmultiplied()` at
   `app.rs:447`/`769`, and use the same conversion in the highlight preview
   (`app.rs:676-681`, which currently calls `self.color.r()/g()/b()`).
+- **Status:** ✅ Done — annotation colors are now stored via
+  `to_srgba_unmultiplied()` (`commit_drag`, `text_window`) and the highlight
+  preview converts the same way, so tiny-skia no longer premultiplies twice.
 
 ### 5. Multiple spotlights darken each other and the background repeatedly
 - **Severity:** Medium
@@ -133,6 +138,9 @@ issue it is credited to **Both**.
 - **Recommendation:** Collect all `Spot` annotations and apply a single pass: per pixel
   compute the minimum normalized distance (or the maximum "lit" factor) across all
   spots, then dim once.
+- **Status:** ✅ Done — `apply_spots` now takes every spotlight and dims each pixel
+  once by the maximum lit factor across all spots; added
+  `overlapping_spotlights_dim_once` regression test.
 
 ### 6. JPEG export drops alpha without compositing
 - **Severity:** Medium
@@ -147,6 +155,8 @@ issue it is credited to **Both**.
 - **Recommendation:** Alpha-composite the rendered image onto an explicit background
   (commonly white) before RGB conversion and JPEG encoding, or ask the user which
   background to use.
+- **Status:** ✅ Done — `to_rgb_on_white` flattens RGBA onto white via straight-alpha
+  compositing before `save_with_format(..., Jpeg)`.
 
 ### 7. Saving with no/unknown extension fails instead of defaulting to PNG
 - **Severity:** Medium
@@ -160,6 +170,10 @@ issue it is credited to **Both**.
 - **Recommendation:** In the fallback arm use
   `img.save_with_format(&path, image::ImageFormat::Png)` (appending `.png` if needed),
   or validate/normalize the extension before saving.
+- **Status:** ✅ Done — saving now matches on the extension: `jpg`/`jpeg` → JPEG,
+  `png` → PNG, and any unknown/missing extension gets `.png` *appended* (via
+  `append_png`, never replacing the typed name) and is written with an explicit
+  `ImageFormat::Png`, so normalisation can't silently clobber a different file.
 
 ### 8. No image-size validation (OOM, GPU texture limit, 0×0 → NaN)
 - **Severity:** Medium
@@ -182,6 +196,13 @@ issue it is credited to **Both**.
   message. Enforce a documented pixel/byte budget with `image::io::Limits` and report
   oversized images. For display, downscale to fit `ctx.input(|i| i.max_texture_side)`
   (keeping full resolution for export).
+- **Status:** ✅ Done — `set_image` rejects 0×0 and images over 64 MP with a status
+  message; `decode_limited` applies `image::Limits` (65 536 px dimension ceiling and a
+  640 MiB allocation budget) during decode, then re-checks the pixel budget **before**
+  `into_rgba8()` so an oversized image can't expand to RGBA first; `rebuild` keeps the
+  full-resolution composite for export but uploads a texture downscaled to
+  `max_texture_side`. Canvas geometry is derived from the source dimensions so pointer
+  mapping stays correct after downscale.
 
 ### 9. Move-drag re-renders and re-uploads the whole image every frame
 - **Severity:** Medium
@@ -199,6 +220,12 @@ issue it is credited to **Both**.
   (like `draw_preview`) and composite once on `drag_stopped`. At minimum, cache the
   "base + pixel effects" layer and invalidate it only when Blur/Spot annotations
   change so vector-only edits skip the blur/spotlight passes.
+- **Status:** ✅ Done — `render` accepts a `skip` index; on drag start the composite is
+  rebuilt once without the dragged annotation and the moving shape is drawn as an egui
+  overlay (`draw_moving`/`paint_annotation`) each frame. Blur/Spot can't be overlaid,
+  so they stay in the composite and are updated in place during the drag (live
+  preview); vector shapes use the overlay. The composite is rebuilt once more on drop,
+  so a vector move costs two renders instead of one per pointer frame.
 
 ### 10. Unbounded, deep-cloning undo/redo history
 - **Severity:** Medium
@@ -212,6 +239,10 @@ issue it is credited to **Both**.
 - **Recommendation:** Store reversible commands/deltas (`Add`, `Remove(i, ann)`,
   `Replace(i, old)`) instead of whole snapshots. At minimum cap history by entry count
   or estimated memory and drop the oldest entries.
+- **Status:** ✅ Done — history is now a stack of `Edit` deltas
+  (`Add`/`Remove`/`Replace`/`Clear`) instead of cloned snapshot vectors, capped at
+  `MAX_HISTORY` entries (`trim_history`). Undo/redo/Clear also drop the (now
+  index-stale) selection so a later Delete can't hit the wrong annotation.
 
 ### 11. Starting a no-op selection drag wipes the redo history
 - **Severity:** Medium
@@ -227,6 +258,10 @@ issue it is credited to **Both**.
 - **Recommendation:** Do not touch history at drag start. Keep `original` in
   `MoveDrag`, and push the undo entry / clear redo only when a real movement is
   committed at drag end.
+- **Status:** ✅ Done — drag start no longer touches history; `end_move` measures the
+  final offset and pushes the `Replace` edit / clears redo only when it exceeds the
+  drag threshold, so a no-op press (or dragging away and back) leaves the redo stack
+  intact.
 
 ### 12. Delete/Backspace clears everything and ignores keyboard focus
 - **Severity:** Medium
@@ -245,6 +280,9 @@ issue it is credited to **Both**.
 - **Recommendation:** Make Delete/Backspace act only on the selected annotation and
   keep "Clear" behind its button. Return early from the whole key handler (except
   Escape) when `ctx.wants_keyboard_input()` is true.
+- **Status:** ✅ Done — Delete/Backspace now removes only the selected annotation (a
+  no-op with nothing selected), and `handle_keys` returns early after Escape when
+  `ctx.wants_keyboard_input()` is true. Status-bar hint updated to "Del remove".
 
 ### 13. Switching tools mid-drag strands drag/move state
 - **Severity:** Medium
@@ -260,6 +298,8 @@ issue it is credited to **Both**.
 - **Recommendation:** In `set_tool`, commit or cancel any in-progress `drag`/`moving`
   (restoring `original` and reconciling history), or ignore tool shortcuts while a
   drag is active.
+- **Status:** ✅ Done — `set_tool` now commits an in-progress shape `drag` and finishes
+  any `moving` gesture before switching tools, so no stale drag/move state survives.
 
 ### 14. Clipboard copy may not persist on Linux
 - **Severity:** Medium
@@ -275,6 +315,9 @@ issue it is credited to **Both**.
 - **Recommendation:** Keep a long-lived `arboard::Clipboard` in `NotelyApp`, created
   lazily and reused for copy and paste. On Linux also consider
   `arboard::SetExtLinux::wait()` on a background thread.
+- **Status:** ✅ Done — `NotelyApp` owns a lazily created `arboard::Clipboard`
+  (`ensure_clipboard`) reused by both copy and paste, so it is no longer dropped
+  immediately after a copy.
 
 ### 15. Packaging: DMG is signed after bundling / advertised path may not exist
 - **Severity:** Medium
@@ -293,6 +336,10 @@ issue it is credited to **Both**.
 - **Recommendation:** Build the `.app`, sign it (without `--deep`), then build the DMG
   from the signed bundle (e.g. `hdiutil create` or cargo-bundle's Apple signing
   support). Only print paths that actually exist.
+- **Status:** ✅ Done — `scripts/package.sh` builds the `.app` (`cargo bundle --release
+  -f osx`), signs it without `--deep`, then stages the signed bundle (with an
+  `/Applications` symlink) and creates the DMG from that staging folder; it only prints
+  paths that exist.
 
 ---
 
@@ -400,3 +447,39 @@ issue it is credited to **Both**.
   input/history interaction bugs 2, 3, 12, 13 and the platform/color issues 4, 14, 20.
   No finding from either review was discarded as invalid; the only edits were merging
   duplicates.
+
+---
+
+## Second-round verification (medium fixes)
+
+Two independent reviewers (Claude Code and Codex, run read-only in parallel) audited the
+medium-severity fixes against the code. Both agreed all twelve were addressed in the
+paths that matter, and both independently flagged the same three residual gaps, which
+were then fixed:
+
+1. **#8 — pixel budget enforced too late.** `decode_limited` expanded to RGBA before the
+   64 MP check, so a large (decoder-legal) image could allocate a multi-GB RGBA buffer
+   first. Now the pixel budget is checked on the decoded dimensions **before**
+   `into_rgba8()`, the allocation budget is 640 MiB, and the dimension ceiling was
+   raised to 65 536 px so long full-page screenshots within the pixel budget are not
+   rejected.
+2. **#9 — Blur/Spot vanished while dragged.** They cannot be represented by a vector
+   overlay. They now stay in the composite and update in place each frame (live
+   preview); vector shapes keep the cheap overlay, so a vector move still costs two
+   renders rather than one per frame.
+3. **#7 — normalising an unknown extension could overwrite a file.** The extension is
+   now *appended* (`append_png`) instead of replaced, so `report.xyz` writes
+   `report.xyz.png` and can never clobber `report.png`.
+
+Both also flagged a stale-selection bug (Delete could hit the wrong annotation after
+undo/redo/Clear); `selected` is now cleared on all three. The reviewers disagreed on
+finding 15: Codex claimed `hdiutil create -srcfolder Notely.app` puts the bundle's
+*contents* at the image root (a High regression), while Claude tested it and found the
+app at the root. An independent check on this machine confirmed the app lands at the
+root, so the ordering was already correct; the script nonetheless now stages the signed
+bundle (plus an `/Applications` symlink) before imaging, which is unambiguous and adds
+the missing drag-to-install shortcut.
+
+Remaining non-blocking notes accepted as-is: the move overlay's arrowhead/text geometry
+and temporary z-order differ slightly from the final render (shapes "snap" on drop), and
+oversized images are re-resized on each rebuild. Both are Low-severity polish items.

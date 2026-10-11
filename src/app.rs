@@ -18,14 +18,23 @@ struct Drag {
 struct MoveDrag {
     index: usize,
     grab: Pos2,
+    current: Pos2,
     original: Annotation,
-    moved: bool,
 }
 
 struct TextState {
     pos: Pos2,
     buffer: String,
     focused: bool,
+}
+
+/// A reversible history entry. Storing deltas instead of full snapshots keeps
+/// undo/redo memory proportional to the edit, not to the whole annotation list.
+enum Edit {
+    Add(Annotation),
+    Remove { index: usize, ann: Annotation },
+    Replace { index: usize, old: Annotation, new: Annotation },
+    Clear(Vec<Annotation>),
 }
 
 pub struct NotelyApp {
@@ -42,14 +51,28 @@ pub struct NotelyApp {
     moving: Option<MoveDrag>,
     selected: Option<usize>,
     text_state: Option<TextState>,
-    undo: Vec<Vec<Annotation>>,
-    redo: Vec<Vec<Annotation>>,
+    undo: Vec<Edit>,
+    redo: Vec<Edit>,
+    clipboard: Option<arboard::Clipboard>,
     font: Option<FontRef<'static>>,
     status: String,
     dirty: bool,
     view_scale: f32,
     view_origin: Vec2,
 }
+
+/// Largest image we are willing to hold in memory, in pixels. Several full
+/// RGBA buffers coexist during rendering, so this bounds worst-case usage.
+const MAX_PIXELS: u64 = 64_000_000;
+/// Hard ceiling on a decoded image's width or height. Checked at header time by
+/// the decoder; it only rejects pathologically long/fat images, while the pixel
+/// budget below does the real bounding.
+const MAX_DIMENSION: u32 = 65_536;
+/// Bytes a decoder may allocate while expanding one image (covers 16-bit RGBA
+/// at up to `MAX_PIXELS`).
+const MAX_DECODE_BYTES: u64 = 640 * 1024 * 1024;
+/// Cap on history entries to bound memory even for delta-based edits.
+const MAX_HISTORY: usize = 256;
 
 const PRESETS: [Color32; 8] = [
     Color32::from_rgb(230, 40, 40),
@@ -95,6 +118,7 @@ impl NotelyApp {
             text_state: None,
             undo: Vec::new(),
             redo: Vec::new(),
+            clipboard: None,
             font,
             status: "Drop, paste or open an image to start annotating.".to_owned(),
             dirty: false,
@@ -107,6 +131,18 @@ impl NotelyApp {
 
     fn set_image(&mut self, img: RgbaImage) {
         let (w, h) = img.dimensions();
+        if w == 0 || h == 0 {
+            self.status = "Image has zero width or height.".to_owned();
+            return;
+        }
+        let pixels = u64::from(w) * u64::from(h);
+        if pixels > MAX_PIXELS {
+            self.status = format!(
+                "Image too large: {w} x {h} px (limit is {} megapixels).",
+                MAX_PIXELS / 1_000_000
+            );
+            return;
+        }
         self.status = format!("{w} x {h} px");
         self.base = Some(img);
         self.annotations.clear();
@@ -122,15 +158,20 @@ impl NotelyApp {
     }
 
     fn load_bytes(&mut self, bytes: &[u8]) {
-        match image::load_from_memory(bytes) {
-            Ok(img) => self.set_image(img.to_rgba8()),
+        let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .map(decode_limited);
+        match reader {
+            Ok(Ok(img)) => self.set_image(img),
+            Ok(Err(err)) => self.status = format!("Could not load image: {err}"),
             Err(err) => self.status = format!("Could not load image: {err}"),
         }
     }
 
     fn load_path(&mut self, path: &std::path::Path) {
-        match image::open(path) {
-            Ok(img) => self.set_image(img.to_rgba8()),
+        match image::ImageReader::open(path).map(decode_limited) {
+            Ok(Ok(img)) => self.set_image(img),
+            Ok(Err(err)) => self.status = format!("Could not load image: {err}"),
             Err(err) => self.status = format!("Could not load image: {err}"),
         }
     }
@@ -145,7 +186,14 @@ impl NotelyApp {
     }
 
     fn paste_image(&mut self) {
-        match arboard::Clipboard::new().and_then(|mut c| c.get_image()) {
+        let result = match self.ensure_clipboard() {
+            Some(c) => c.get_image(),
+            None => {
+                self.status = "Clipboard is not available.".to_owned();
+                return;
+            }
+        };
+        match result {
             Ok(data) => {
                 match RgbaImage::from_raw(data.width as u32, data.height as u32, data.bytes.into_owned())
                 {
@@ -157,32 +205,93 @@ impl NotelyApp {
         }
     }
 
+    /// A single clipboard instance kept for the life of the app. On X11/Wayland
+    /// the process owns the selection, so dropping the handle after a copy makes
+    /// the contents disappear; reusing it keeps them available.
+    fn ensure_clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
+        if self.clipboard.is_none() {
+            self.clipboard = arboard::Clipboard::new().ok();
+        }
+        self.clipboard.as_mut()
+    }
+
     // -- history -----------------------------------------------------------
 
     fn push(&mut self, ann: Annotation) {
-        self.undo.push(self.annotations.clone());
+        self.undo.push(Edit::Add(ann.clone()));
+        self.trim_history();
         self.redo.clear();
         self.annotations.push(ann);
         self.dirty = true;
     }
 
-    fn undo(&mut self) {
-        if let Some(prev) = self.undo.pop() {
-            self.redo.push(std::mem::replace(&mut self.annotations, prev));
-            self.dirty = true;
+    fn trim_history(&mut self) {
+        while self.undo.len() > MAX_HISTORY {
+            self.undo.remove(0);
         }
+    }
+
+    fn undo(&mut self) {
+        let Some(edit) = self.undo.pop() else {
+            return;
+        };
+        match &edit {
+            Edit::Add(_) => {
+                self.annotations.pop();
+            }
+            Edit::Remove { index, ann } => {
+                self.annotations.insert((*index).min(self.annotations.len()), ann.clone());
+            }
+            Edit::Replace { index, old, .. } => {
+                if *index < self.annotations.len() {
+                    self.annotations[*index] = old.clone();
+                }
+            }
+            Edit::Clear(prev) => {
+                self.annotations = prev.clone();
+            }
+        }
+        self.redo.push(edit);
+        // Indices shift under undo/redo; drop the selection rather than let it
+        // point at (and let Delete remove) a different annotation.
+        self.selected = None;
+        self.dirty = true;
     }
 
     fn redo(&mut self) {
-        if let Some(next) = self.redo.pop() {
-            self.undo.push(std::mem::replace(&mut self.annotations, next));
-            self.dirty = true;
+        let Some(edit) = self.redo.pop() else {
+            return;
+        };
+        match &edit {
+            Edit::Add(ann) => {
+                self.annotations.push(ann.clone());
+            }
+            Edit::Remove { index, .. } => {
+                if *index < self.annotations.len() {
+                    self.annotations.remove(*index);
+                }
+            }
+            Edit::Replace { index, new, .. } => {
+                if *index < self.annotations.len() {
+                    self.annotations[*index] = new.clone();
+                }
+            }
+            Edit::Clear(_) => {
+                self.annotations.clear();
+            }
         }
+        self.undo.push(edit);
+        self.selected = None;
+        self.dirty = true;
     }
 
     fn clear_annotations(&mut self) {
+        self.drag = None;
+        self.moving = None;
+        self.selected = None;
         if !self.annotations.is_empty() {
-            self.undo.push(std::mem::take(&mut self.annotations));
+            self.undo.push(Edit::Clear(std::mem::take(&mut self.annotations)));
+            self.trim_history();
             self.redo.clear();
             self.dirty = true;
         }
@@ -195,9 +304,31 @@ impl NotelyApp {
             self.dirty = false;
             return;
         };
-        let out = render::render(base, &self.annotations, self.font.as_ref());
-        let size = [out.width() as usize, out.height() as usize];
-        let color = ColorImage::from_rgba_unmultiplied(size, out.as_raw());
+        // Blur/Spot can't be represented by an egui overlay, so they stay in the
+        // composite and are updated in place during a drag. Vector shapes are
+        // skipped and drawn as an overlay.
+        let skip = self
+            .moving
+            .as_ref()
+            .filter(|m| !is_pixel_effect(&m.original))
+            .map(|m| m.index);
+        let out = render::render(base, &self.annotations, self.font.as_ref(), skip);
+        // Keep the full-resolution composite for export, but upload a texture no
+        // larger than the GPU supports so large screenshots still display.
+        let max_side = ctx.input(|i| i.max_texture_side).max(1);
+        let color = if out.width() as usize > max_side || out.height() as usize > max_side {
+            let scale = (max_side as f32 / out.width().max(out.height()) as f32).min(1.0);
+            let nw = ((out.width() as f32 * scale).round() as u32).max(1);
+            let nh = ((out.height() as f32 * scale).round() as u32).max(1);
+            let scaled =
+                image::imageops::resize(&out, nw, nh, image::imageops::FilterType::Triangle);
+            ColorImage::from_rgba_unmultiplied([nw as usize, nh as usize], scaled.as_raw())
+        } else {
+            ColorImage::from_rgba_unmultiplied(
+                [out.width() as usize, out.height() as usize],
+                out.as_raw(),
+            )
+        };
         match &mut self.texture {
             Some(tex) => tex.set(color, TextureOptions::LINEAR),
             None => self.texture = Some(ctx.load_texture("composite", color, TextureOptions::LINEAR)),
@@ -207,25 +338,34 @@ impl NotelyApp {
     }
 
     fn ensure_fresh(&mut self) {
-        if self.dirty || self.composite.is_none() {
+        // While a move is in progress the cached composite deliberately omits the
+        // dragged vector annotation, so force a full render for export/copy.
+        if self.dirty || self.composite.is_none() || self.moving.is_some() {
             if let Some(base) = &self.base {
-                self.composite = Some(render::render(base, &self.annotations, self.font.as_ref()));
+                self.composite =
+                    Some(render::render(base, &self.annotations, self.font.as_ref(), None));
             }
         }
     }
 
     fn copy_to_clipboard(&mut self) {
         self.ensure_fresh();
-        let Some(img) = &self.composite else {
-            self.status = "Nothing to copy yet.".to_owned();
-            return;
+        let data = match &self.composite {
+            Some(img) => arboard::ImageData {
+                width: img.width() as usize,
+                height: img.height() as usize,
+                bytes: img.as_raw().clone().into(),
+            },
+            None => {
+                self.status = "Nothing to copy yet.".to_owned();
+                return;
+            }
         };
-        let data = arboard::ImageData {
-            width: img.width() as usize,
-            height: img.height() as usize,
-            bytes: img.as_raw().clone().into(),
+        let result = match self.ensure_clipboard() {
+            Some(c) => c.set_image(data),
+            None => Err(arboard::Error::ClipboardNotSupported),
         };
-        match arboard::Clipboard::new().and_then(|mut c| c.set_image(data)) {
+        match result {
             Ok(()) => self.status = "Annotated image copied to clipboard.".to_owned(),
             Err(err) => self.status = format!("Copy failed: {err}"),
         }
@@ -245,14 +385,23 @@ impl NotelyApp {
         else {
             return;
         };
-        let result = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase) {
-            Some(ext) if ext == "jpg" || ext == "jpeg" => {
-                image::DynamicImage::ImageRgba8(img.clone()).to_rgb8().save(&path)
+        let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+        let (final_path, result) = match ext.as_deref() {
+            Some("jpg") | Some("jpeg") => (
+                path.clone(),
+                to_rgb_on_white(img).save_with_format(&path, image::ImageFormat::Jpeg),
+            ),
+            Some("png") => (path.clone(), img.save_with_format(&path, image::ImageFormat::Png)),
+            // Unknown or missing extension: append `.png` (never replace the
+            // existing name) and write an explicit PNG, rather than relying on
+            // `save`, which fails when the format can't be inferred.
+            _ => {
+                let png = append_png(&path);
+                (png.clone(), img.save_with_format(&png, image::ImageFormat::Png))
             }
-            _ => img.save(&path),
         };
         match result {
-            Ok(()) => self.status = format!("Saved to {}", path.display()),
+            Ok(()) => self.status = format!("Saved to {}", final_path.display()),
             Err(err) => self.status = format!("Save failed: {err}"),
         }
     }
@@ -287,6 +436,14 @@ impl NotelyApp {
     }
 
     fn set_tool(&mut self, tool: Tool) {
+        // Commit (or finish) any gesture in progress so a tool change can never
+        // strand a `drag`/`moving` that references a stale annotation index.
+        if self.drag.is_some() {
+            self.commit_drag();
+        }
+        if self.moving.is_some() {
+            self.end_move();
+        }
         self.tool = tool;
         if tool != Tool::Select {
             self.selected = None;
@@ -300,28 +457,34 @@ impl NotelyApp {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.selected = None;
         }
+        // A focused widget (e.g. the colour picker's hex field) owns the
+        // keyboard: don't let canvas shortcuts steal Backspace or Cmd+Z from it.
+        // Saving stays global so Cmd/Ctrl+S always works.
+        if ctx.wants_keyboard_input() {
+            if ctx.input(|i| i.key_pressed(egui::Key::S) && i.modifiers.command) {
+                self.save_export();
+            }
+            return;
+        }
         // While a drag is in progress, ignore shortcuts that could mutate the
         // annotation list (delete/undo/redo/paste) or switch tools, which would
         // invalidate the index stored by the in-progress drag.
         if self.drag.is_some() || self.moving.is_some() {
             return;
         }
-        let wants_kb = ctx.wants_keyboard_input();
-        if !wants_kb {
-            let tool = ctx.input(|i| {
-                if !i.modifiers.is_none() {
-                    return None;
-                }
-                [(egui::Key::S, Tool::Select), (egui::Key::A, Tool::Arrow), (egui::Key::R, Tool::Rect)]
-                    .into_iter()
-                    .find(|(key, _)| i.key_pressed(*key))
-                    .map(|(_, tool)| tool)
-            });
-            if let Some(tool) = tool {
-                self.set_tool(tool);
+        let tool = ctx.input(|i| {
+            if !i.modifiers.is_none() {
+                return None;
             }
+            [(egui::Key::S, Tool::Select), (egui::Key::A, Tool::Arrow), (egui::Key::R, Tool::Rect)]
+                .into_iter()
+                .find(|(key, _)| i.key_pressed(*key))
+                .map(|(_, tool)| tool)
+        });
+        if let Some(tool) = tool {
+            self.set_tool(tool);
         }
-        let (undo, redo, copy, save, paste, clear) = ctx.input(|i| {
+        let (undo, redo, copy, save, paste, delete) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::Z) && i.modifiers.command && !i.modifiers.shift,
                 i.key_pressed(egui::Key::Z) && i.modifiers.command && i.modifiers.shift,
@@ -330,11 +493,10 @@ impl NotelyApp {
                 i.key_pressed(egui::Key::S) && i.modifiers.command,
                 // On macOS an NSEvent monitor handles ⌘V for images (see
                 // macos_paste); elsewhere fall back to Event::Paste (text) or
-                // Key::V. Only paste into the canvas when a widget isn't editing
-                // text, so this never hijacks a paste into a text field.
-                !wants_kb
-                    && (i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
-                        || (i.key_pressed(egui::Key::V) && i.modifiers.command)),
+                // Key::V. A focused text field returned above, so this cannot
+                // hijack a paste into one.
+                i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
+                    || (i.key_pressed(egui::Key::V) && i.modifiers.command),
                 i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
             )
         });
@@ -353,17 +515,18 @@ impl NotelyApp {
         if paste {
             self.paste_image();
         }
-        if clear {
+        if delete {
+            // Only remove the selected annotation; clearing everything stays
+            // behind the explicit "Clear" button.
             if let Some(i) = self.selected {
                 if i < self.annotations.len() {
-                    self.undo.push(self.annotations.clone());
+                    let ann = self.annotations.remove(i);
+                    self.undo.push(Edit::Remove { index: i, ann });
+                    self.trim_history();
                     self.redo.clear();
-                    self.annotations.remove(i);
                     self.selected = None;
                     self.dirty = true;
                 }
-            } else if !self.annotations.is_empty() {
-                self.clear_annotations();
             }
         }
     }
@@ -388,11 +551,13 @@ impl NotelyApp {
                 if let Some(p) = response.interact_pointer_pos() {
                     let ip = self.screen_to_img(p);
                     if let Some(idx) = self.hit_test(ip, tol) {
-                        self.undo.push(self.annotations.clone());
-                        self.redo.clear();
                         self.selected = Some(idx);
                         let original = self.annotations[idx].clone();
-                        self.moving = Some(MoveDrag { index: idx, grab: ip, original, moved: false });
+                        self.moving = Some(MoveDrag { index: idx, grab: ip, current: ip, original });
+                        // Re-render without the dragged vector annotation; it is
+                        // drawn as an overlay until the drop. Pixel effects stay
+                        // in the composite and update in place below.
+                        self.dirty = true;
                     } else {
                         self.selected = None;
                     }
@@ -402,26 +567,25 @@ impl NotelyApp {
                 if let Some(p) = response.interact_pointer_pos() {
                     let ip = self.screen_to_img(p);
                     if let Some(m) = self.moving.as_mut() {
-                        let delta = ip - m.grab;
-                        if delta.length() > 0.5 / self.view_scale {
-                            m.moved = true;
+                        m.current = ip;
+                    }
+                    // Live-update pixel effects (blur/spotlight) in place; vector
+                    // shapes use the cheap overlay and only commit on drop.
+                    if let Some(m) = &self.moving {
+                        if is_pixel_effect(&m.original) {
+                            let idx = m.index;
+                            let mut ann = m.original.clone();
+                            ann.translate(m.current - m.grab);
+                            if idx < self.annotations.len() {
+                                self.annotations[idx] = ann;
+                            }
+                            self.dirty = true;
                         }
-                        let idx = m.index;
-                        let mut ann = m.original.clone();
-                        ann.translate(delta);
-                        if let Some(slot) = self.annotations.get_mut(idx) {
-                            *slot = ann;
-                        }
-                        self.dirty = true;
                     }
                 }
             }
             if response.drag_stopped() {
-                if let Some(m) = self.moving.take() {
-                    if !m.moved {
-                        self.undo.pop();
-                    }
-                }
+                self.end_move();
             }
             if response.clicked() {
                 if let Some(p) = response.interact_pointer_pos() {
@@ -461,7 +625,8 @@ impl NotelyApp {
         let Some(d) = self.drag.take() else {
             return;
         };
-        let color = self.color.to_array();
+        // tiny-skia colors use straight (unpremultiplied) alpha.
+        let color = self.color.to_srgba_unmultiplied();
         let width = self.width;
         let ann = match d.tool {
             Tool::Arrow => {
@@ -501,6 +666,37 @@ impl NotelyApp {
         if let Some(ann) = ann {
             self.push(ann);
         }
+    }
+
+    /// Commit an in-progress move. History is only touched when the annotation
+    /// actually moved, so a mere press (or long-press without movement) leaves
+    /// the redo stack intact.
+    fn end_move(&mut self) {
+        let Some(m) = self.moving.take() else {
+            return;
+        };
+        if m.index < self.annotations.len() {
+            // Decide from the final offset, so dragging away and back to the
+            // start is treated as a no-op.
+            let delta = m.current - m.grab;
+            if delta.length() > 0.5 / self.view_scale {
+                let mut ann = m.original.clone();
+                ann.translate(delta);
+                self.undo.push(Edit::Replace {
+                    index: m.index,
+                    old: m.original.clone(),
+                    new: ann.clone(),
+                });
+                self.trim_history();
+                self.redo.clear();
+                self.annotations[m.index] = ann;
+            } else {
+                // Pixel effects were updated in place during the drag; restore.
+                self.annotations[m.index] = m.original.clone();
+            }
+        }
+        // Put the annotation back into the composite (or restore it unchanged).
+        self.dirty = true;
     }
 
     fn hit_test(&self, p: Pos2, tol: f32) -> Option<usize> {
@@ -603,7 +799,7 @@ impl NotelyApp {
             ui.horizontal(|ui| {
                 ui.label(&self.status);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label("S select  ·  A arrow  ·  R rect  ·  Cmd/Ctrl+Z undo  ·  Cmd/Ctrl+Shift+Z redo  ·  Cmd/Ctrl+C copy  ·  Cmd/Ctrl+S save  ·  Del clear");
+                    ui.label("S select  ·  A arrow  ·  R rect  ·  Cmd/Ctrl+Z undo  ·  Cmd/Ctrl+Shift+Z redo  ·  Cmd/Ctrl+C copy  ·  Cmd/Ctrl+S save  ·  Del remove");
                 });
             });
         });
@@ -616,7 +812,9 @@ impl NotelyApp {
             let response = ui.allocate_rect(rect, Sense::click_and_drag());
             let painter = ui.painter_at(rect);
 
-            let Some((tex_id, img)) = self.texture.as_ref().map(|t| (t.id(), t.size_vec2())) else {
+            let dims = self.base.as_ref().map(|b| b.dimensions());
+            let tex_id = self.texture.as_ref().map(|t| t.id());
+            let (Some((bw, bh)), Some(tex_id)) = (dims, tex_id) else {
                 painter.text(
                     rect.center(),
                     Align2::CENTER_CENTER,
@@ -627,6 +825,9 @@ impl NotelyApp {
                 return;
             };
 
+            // Geometry is derived from the full-resolution image, not the (possibly
+            // downscaled) display texture, so pointer coordinates stay in image space.
+            let img = egui::vec2(bw as f32, bh as f32);
             let pad = 24.0;
             let scale = ((rect.width() - 2.0 * pad) / img.x)
                 .min((rect.height() - 2.0 * pad) / img.y)
@@ -636,6 +837,13 @@ impl NotelyApp {
             let img_rect = Rect::from_min_size(tl, disp);
             self.view_scale = scale;
             self.view_origin = tl.to_vec2();
+
+            // Handle input first so a rebuild triggered here (drag start, edit)
+            // reaches the texture before it is painted this same frame.
+            self.handle_canvas_input(&response);
+            if self.dirty {
+                self.rebuild(ctx);
+            }
 
             painter.rect_filled(img_rect.expand(1.0), 2.0, Color32::from_gray(70));
 
@@ -653,8 +861,8 @@ impl NotelyApp {
                 Color32::WHITE,
             );
 
-            self.handle_canvas_input(&response);
             self.draw_preview(&painter);
+            self.draw_moving(&painter);
             self.draw_selection(&painter);
 
             if self.tool == Tool::Select {
@@ -695,8 +903,8 @@ impl NotelyApp {
             }
             Tool::Highlight => {
                 let pts: Vec<Pos2> = d.points.iter().map(|p| self.img_to_screen(*p)).collect();
-                let hi =
-                    Color32::from_rgba_unmultiplied(self.color.r(), self.color.g(), self.color.b(), 90);
+                let [r, g, b, _] = self.color.to_srgba_unmultiplied();
+                let hi = Color32::from_rgba_unmultiplied(r, g, b, 90);
                 let w = (self.width.max(6.0) * self.view_scale).max(4.0);
                 painter.add(egui::Shape::line(pts, egui::Stroke::new(w, hi)));
             }
@@ -727,12 +935,108 @@ impl NotelyApp {
         }
     }
 
+    /// Draw the annotation being dragged as an egui overlay, so a move costs no
+    /// per-frame re-render or texture upload.
+    fn draw_moving(&self, painter: &egui::Painter) {
+        let Some(m) = &self.moving else {
+            return;
+        };
+        // Pixel effects are already shown live in the composite.
+        if is_pixel_effect(&m.original) {
+            return;
+        }
+        let mut ann = m.original.clone();
+        ann.translate(m.current - m.grab);
+        self.paint_annotation(painter, &ann);
+    }
+
+    fn paint_annotation(&self, painter: &egui::Painter, ann: &Annotation) {
+        let s = self.view_scale;
+        let rgba = |c: &[u8; 4]| Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+        match ann {
+            Annotation::Arrow { from, to, color, width } => {
+                let a = self.img_to_screen(*from);
+                let b = self.img_to_screen(*to);
+                painter.arrow(a, b - a, egui::Stroke::new((*width * s).max(1.0), rgba(color)));
+            }
+            Annotation::Rect { rect, color, width } => {
+                painter.rect_stroke(
+                    self.img_rect_to_screen(*rect),
+                    0.0,
+                    egui::Stroke::new((*width * s).max(1.0), rgba(color)),
+                    egui::StrokeKind::Middle,
+                );
+            }
+            Annotation::Ellipse { rect, color, width } => {
+                let r = self.img_rect_to_screen(*rect);
+                painter.add(egui::Shape::ellipse_stroke(
+                    r.center(),
+                    r.size() / 2.0,
+                    egui::Stroke::new((*width * s).max(1.0), rgba(color)),
+                ));
+            }
+            Annotation::Highlight { points, color, width } => {
+                let pts: Vec<Pos2> = points.iter().map(|p| self.img_to_screen(*p)).collect();
+                if pts.len() >= 2 {
+                    let hi = Color32::from_rgba_unmultiplied(color[0], color[1], color[2], 90);
+                    let w = ((*width).max(6.0) * s).max(4.0);
+                    painter.add(egui::Shape::line(pts, egui::Stroke::new(w, hi)));
+                }
+            }
+            Annotation::Blur { rect, .. } => {
+                let r = self.img_rect_to_screen(*rect);
+                painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(120, 120, 120, 60));
+                painter.rect_stroke(
+                    r,
+                    0.0,
+                    egui::Stroke::new(2.0_f32, Color32::from_gray(220)),
+                    egui::StrokeKind::Middle,
+                );
+                painter.text(
+                    r.center(),
+                    Align2::CENTER_CENTER,
+                    "Blur",
+                    FontId::proportional(14.0),
+                    Color32::from_gray(220),
+                );
+            }
+            Annotation::Spot { center, radius } => {
+                painter.circle_stroke(
+                    self.img_to_screen(*center),
+                    radius * s,
+                    egui::Stroke::new(2.0_f32, Color32::from_gray(220)),
+                );
+            }
+            Annotation::Text { pos, text, color, size } => {
+                painter.text(
+                    self.img_to_screen(*pos),
+                    Align2::LEFT_TOP,
+                    text,
+                    FontId::proportional((*size * s).max(1.0)),
+                    rgba(color),
+                );
+            }
+        }
+    }
+
+    fn img_rect_to_screen(&self, r: Rect) -> Rect {
+        Rect::from_min_max(self.img_to_screen(r.min), self.img_to_screen(r.max))
+    }
+
     fn draw_selection(&self, painter: &egui::Painter) {
         if self.tool != Tool::Select {
             return;
         }
-        let Some(ann) = self.selected.and_then(|i| self.annotations.get(i)) else {
-            return;
+        // While moving, outline the annotation at its dragged position.
+        let ann = if let Some(m) = &self.moving {
+            let mut a = m.original.clone();
+            a.translate(m.current - m.grab);
+            a
+        } else {
+            match self.selected.and_then(|i| self.annotations.get(i)) {
+                Some(a) => a.clone(),
+                None => return,
+            }
         };
         let b = ann.bounds(self.font.as_ref());
         let rect = Rect::from_min_max(self.img_to_screen(b.min), self.img_to_screen(b.max)).expand(4.0);
@@ -786,7 +1090,7 @@ impl NotelyApp {
                 self.push(Annotation::Text {
                     pos: st.pos,
                     text,
-                    color: self.color.to_array(),
+                    color: self.color.to_srgba_unmultiplied(),
                     size: self.font_size,
                 });
             }
@@ -828,6 +1132,58 @@ impl eframe::App for NotelyApp {
             ctx.request_repaint();
         }
     }
+}
+
+/// Decode an image while enforcing decoder resource limits, returning RGBA8.
+fn decode_limited<R: std::io::BufRead + std::io::Seek>(
+    mut reader: image::ImageReader<R>,
+) -> Result<RgbaImage, image::ImageError> {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_DIMENSION);
+    limits.max_image_height = Some(MAX_DIMENSION);
+    limits.max_alloc = Some(MAX_DECODE_BYTES);
+    reader.limits(limits);
+    let img = reader.decode()?;
+    // Reject oversized images *before* expanding to RGBA, which can otherwise
+    // allocate several times the decoded size (e.g. 8-bit grey -> 32-bit RGBA).
+    let pixels = u64::from(img.width()) * u64::from(img.height());
+    if pixels > MAX_PIXELS {
+        return Err(image::ImageError::Limits(image::error::LimitError::from_kind(
+            image::error::LimitErrorKind::DimensionError,
+        )));
+    }
+    Ok(img.into_rgba8())
+}
+
+/// Blur and spotlight are whole-pixel effects that cannot be represented by an
+/// egui vector overlay.
+fn is_pixel_effect(ann: &Annotation) -> bool {
+    matches!(ann, Annotation::Blur { .. } | Annotation::Spot { .. })
+}
+
+/// Append `.png` to a path's file name (rather than replacing its extension),
+/// so normalising an unknown extension can never clobber a different file.
+fn append_png(path: &std::path::Path) -> std::path::PathBuf {
+    let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(".png");
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(name),
+        _ => std::path::PathBuf::from(name),
+    }
+}
+
+/// Flatten an RGBA image onto a white background, for formats without alpha.
+fn to_rgb_on_white(img: &RgbaImage) -> image::RgbImage {
+    let (w, h) = img.dimensions();
+    let mut out = image::RgbImage::new(w, h);
+    for (dst, src) in out.pixels_mut().zip(img.pixels()) {
+        let a = u32::from(src[3]);
+        let inv = 255 - a;
+        dst[0] = ((u32::from(src[0]) * a + 255 * inv + 127) / 255) as u8;
+        dst[1] = ((u32::from(src[1]) * a + 255 * inv + 127) / 255) as u8;
+        dst[2] = ((u32::from(src[2]) * a + 255 * inv + 127) / 255) as u8;
+    }
+    out
 }
 
 fn make_checker() -> ColorImage {
