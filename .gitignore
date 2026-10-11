@@ -1,0 +1,32 @@
+# Rust build output
+/target
+**/*.rs.bk
+*.pdb
+
+# Generated during icon builds (scripts/make_icon.sh)
+/icons/icon.iconset/
+
+# Packaged artifacts
+*.dmg
+*.app/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Tooling scratch
+/.playwright-mcp/
+.claude/settings.local.json
+
+# Env / secrets
+.env
+.env.*
