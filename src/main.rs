@@ -4,6 +4,8 @@ mod annotation;
 mod app;
 #[cfg(target_os = "macos")]
 mod macos_open;
+#[cfg(target_os = "macos")]
+mod macos_paste;
 mod render;
 
 fn window_icon() -> Option<egui::IconData> {

@@ -159,7 +159,9 @@ fn draw_arrow(pm: &mut Pixmap, from: Pos2, to: Pos2, color: [u8; 4], width: f32)
         return;
     }
     let dir = dir / len;
-    let head = (width * 4.5).clamp(10.0, len * 0.6);
+    // `f32::clamp` panics when the minimum exceeds the maximum; short arrows
+    // (len * 0.6 < 10) would invert the bounds. Compose max/min instead.
+    let head = (width * 4.5).max(10.0).min(len * 0.6);
     let perp = egui::vec2(-dir.y, dir.x);
     let base = to - dir * head;
     let left = base + perp * (head * 0.45);
@@ -363,5 +365,19 @@ mod tests {
         let out = render(&base(), &anns, font.as_ref());
         assert_eq!(out.dimensions(), (520, 360));
         out.save(std::env::temp_dir().join("notely_render_test.png")).unwrap();
+    }
+
+    #[test]
+    fn renders_short_arrows_without_panicking() {
+        for len in [1.0_f32, 2.0, 5.0, 10.0, 16.0, 16.7] {
+            let anns = vec![Annotation::Arrow {
+                from: pos2(50.0, 50.0),
+                to: pos2(50.0 + len, 50.0),
+                color: [0, 0, 0, 255],
+                width: 4.0,
+            }];
+            let out = render(&base(), &anns, None);
+            assert_eq!(out.dimensions(), (520, 360));
+        }
     }
 }

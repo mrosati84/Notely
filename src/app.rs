@@ -76,6 +76,8 @@ impl NotelyApp {
 
         #[cfg(target_os = "macos")]
         crate::macos_open::set_context(cc.egui_ctx.clone());
+        #[cfg(target_os = "macos")]
+        crate::macos_paste::install(cc.egui_ctx.clone());
 
         Self {
             base: None,
@@ -295,7 +297,17 @@ impl NotelyApp {
         if self.text_state.is_some() {
             return;
         }
-        if !ctx.wants_keyboard_input() {
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.selected = None;
+        }
+        // While a drag is in progress, ignore shortcuts that could mutate the
+        // annotation list (delete/undo/redo/paste) or switch tools, which would
+        // invalidate the index stored by the in-progress drag.
+        if self.drag.is_some() || self.moving.is_some() {
+            return;
+        }
+        let wants_kb = ctx.wants_keyboard_input();
+        if !wants_kb {
             let tool = ctx.input(|i| {
                 if !i.modifiers.is_none() {
                     return None;
@@ -316,7 +328,13 @@ impl NotelyApp {
                 // egui-winit turns Cmd/Ctrl+C into Event::Copy and swallows the key event.
                 i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
                 i.key_pressed(egui::Key::S) && i.modifiers.command,
-                i.key_pressed(egui::Key::V) && i.modifiers.command,
+                // On macOS an NSEvent monitor handles ⌘V for images (see
+                // macos_paste); elsewhere fall back to Event::Paste (text) or
+                // Key::V. Only paste into the canvas when a widget isn't editing
+                // text, so this never hijacks a paste into a text field.
+                !wants_kb
+                    && (i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
+                        || (i.key_pressed(egui::Key::V) && i.modifiers.command)),
                 i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
             )
         });
@@ -347,9 +365,6 @@ impl NotelyApp {
             } else if !self.annotations.is_empty() {
                 self.clear_annotations();
             }
-        }
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.selected = None;
         }
     }
 
@@ -394,7 +409,9 @@ impl NotelyApp {
                         let idx = m.index;
                         let mut ann = m.original.clone();
                         ann.translate(delta);
-                        self.annotations[idx] = ann;
+                        if let Some(slot) = self.annotations.get_mut(idx) {
+                            *slot = ann;
+                        }
                         self.dirty = true;
                     }
                 }
@@ -504,6 +521,9 @@ impl NotelyApp {
                 if ui.button("Open image").clicked() {
                     self.open_dialog();
                 }
+                if ui.button("Paste").clicked() {
+                    self.paste_image();
+                }
                 ui.separator();
 
                 for tool in Tool::ALL {
@@ -583,7 +603,7 @@ impl NotelyApp {
             ui.horizontal(|ui| {
                 ui.label(&self.status);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label("S select  ·  A arrow  ·  R rect  ·  Cmd/Ctrl+Z undo  ·  Cmd/Ctrl+Shift+Z redo  ·  Cmd/Ctrl+C copy  ·  Cmd/Ctrl+S save  ·  Cmd/Ctrl+V paste  ·  Del clear");
+                    ui.label("S select  ·  A arrow  ·  R rect  ·  Cmd/Ctrl+Z undo  ·  Cmd/Ctrl+Shift+Z redo  ·  Cmd/Ctrl+C copy  ·  Cmd/Ctrl+S save  ·  Del clear");
                 });
             });
         });
@@ -600,7 +620,7 @@ impl NotelyApp {
                 painter.text(
                     rect.center(),
                     Align2::CENTER_CENTER,
-                    "Drag & drop, paste (Cmd/Ctrl+V) or click \"Open image\" to begin",
+                    "Drag & drop an image, click \"Open image\", or use Paste to begin",
                     FontId::proportional(18.0),
                     Color32::from_gray(150),
                 );
@@ -781,6 +801,15 @@ impl eframe::App for NotelyApp {
         #[cfg(target_os = "macos")]
         for path in crate::macos_open::take_pending() {
             self.load_path(&path);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            crate::macos_paste::set_text_input_active(
+                self.text_state.is_some() || ctx.wants_keyboard_input(),
+            );
+            if crate::macos_paste::take_requested() {
+                self.paste_image();
+            }
         }
 
         self.handle_dropped(ctx);
