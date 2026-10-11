@@ -22,6 +22,7 @@ Supported input formats: PNG, JPEG, GIF, BMP, WebP and TIFF.
 | `S` | Select tool |
 | `A` | Arrow tool |
 | `R` | Rectangle tool |
+| `T` | Text tool |
 | `Cmd/Ctrl+V` | Paste image from clipboard |
 | `Cmd/Ctrl+C` | Copy annotated image |
 | `Cmd/Ctrl+S` | Save as PNG or JPEG |

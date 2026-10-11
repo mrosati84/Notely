@@ -476,10 +476,15 @@ impl NotelyApp {
             if !i.modifiers.is_none() {
                 return None;
             }
-            [(egui::Key::S, Tool::Select), (egui::Key::A, Tool::Arrow), (egui::Key::R, Tool::Rect)]
-                .into_iter()
-                .find(|(key, _)| i.key_pressed(*key))
-                .map(|(_, tool)| tool)
+            [
+                (egui::Key::S, Tool::Select),
+                (egui::Key::A, Tool::Arrow),
+                (egui::Key::R, Tool::Rect),
+                (egui::Key::T, Tool::Text),
+            ]
+            .into_iter()
+            .find(|(key, _)| i.key_pressed(*key))
+            .map(|(_, tool)| tool)
         });
         if let Some(tool) = tool {
             self.set_tool(tool);
