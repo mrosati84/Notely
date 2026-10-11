@@ -93,7 +93,15 @@ fn apply_blur(buf: &mut RgbaImage, rect: Rect, sigma: f32) {
         return;
     }
     let sub = imageops::crop_imm(buf, x, y, w, h).to_image();
-    let blurred = imageops::blur(&sub, sigma.max(0.5));
+    // A plain Gaussian leaves text legible at small sigmas. Average the region
+    // down to coarse blocks first so fine detail is destroyed, then scale back
+    // up and smooth the block edges so it still reads as a blur, not a mosaic.
+    let block = (sigma * 6.0).max(2.0);
+    let sw = ((w as f32 / block).ceil() as u32).max(1);
+    let sh = ((h as f32 / block).ceil() as u32).max(1);
+    let small = imageops::resize(&sub, sw, sh, imageops::FilterType::Triangle);
+    let up = imageops::resize(&small, w, h, imageops::FilterType::Triangle);
+    let blurred = imageops::blur(&up, sigma.max(0.5));
     imageops::replace(buf, &blurred, x as i64, y as i64);
 }
 
