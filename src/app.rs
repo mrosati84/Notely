@@ -5,7 +5,7 @@ use egui::{
 };
 use image::RgbaImage;
 
-use crate::annotation::{Annotation, Tool};
+use crate::annotation::{Annotation, Handle, Tool};
 use crate::render;
 
 struct Drag {
@@ -15,11 +15,41 @@ struct Drag {
     points: Vec<Pos2>,
 }
 
+/// An in-progress move (or, with `handle`, resize) of an existing annotation.
 struct MoveDrag {
     index: usize,
     grab: Pos2,
     current: Pos2,
     original: Annotation,
+    /// The corner being dragged and the selection box at drag start.
+    handle: Option<(Handle, Rect)>,
+}
+
+impl MoveDrag {
+    /// The annotation as it would be if the drag ended now.
+    fn preview(&self) -> Annotation {
+        let mut ann = self.original.clone();
+        let delta = self.current - self.grab;
+        match self.handle {
+            Some((handle, bounds)) => ann.resize(bounds, handle, delta),
+            None => ann.translate(delta),
+        }
+        ann
+    }
+}
+
+/// Screen-space padding between an annotation's bounds and its selection box.
+const SELECTION_PAD: f32 = 4.0;
+/// Screen-space side length of a drawn resize handle.
+const HANDLE_SIZE: f32 = 6.0;
+/// Screen-space side length of a resize handle's hit area.
+const HANDLE_HIT: f32 = 12.0;
+
+fn handle_cursor(handle: Handle) -> egui::CursorIcon {
+    match handle {
+        Handle::TopLeft | Handle::BottomRight => egui::CursorIcon::ResizeNwSe,
+        Handle::TopRight | Handle::BottomLeft => egui::CursorIcon::ResizeNeSw,
+    }
 }
 
 struct TextState {
@@ -554,12 +584,27 @@ impl NotelyApp {
         if self.tool == Tool::Select {
             let tol = 5.0 / self.view_scale;
             if response.drag_started() {
-                if let Some(p) = response.interact_pointer_pos() {
+                // Hit-test where the button went down, not where the drag
+                // threshold was crossed, so small handles are reliably grabbed.
+                let origin = response.ctx.input(|i| i.pointer.press_origin());
+                if let Some(p) = origin.or(response.interact_pointer_pos()) {
                     let ip = self.screen_to_img(p);
-                    if let Some(idx) = self.hit_test(ip, tol) {
+                    // Handles of the selected annotation take priority: they sit
+                    // outside the shape and may overlap other annotations.
+                    let resize = self.handle_at(p).and_then(|h| {
+                        let idx = self.selected?;
+                        let bounds = self.annotations.get(idx)?.bounds(self.font.as_ref());
+                        Some((idx, h, bounds))
+                    });
+                    let target = match resize {
+                        Some((idx, h, bounds)) => Some((idx, Some((h, bounds)))),
+                        None => self.hit_test(ip, tol).map(|idx| (idx, None)),
+                    };
+                    if let Some((idx, handle)) = target {
                         self.selected = Some(idx);
                         let original = self.annotations[idx].clone();
-                        self.moving = Some(MoveDrag { index: idx, grab: ip, current: ip, original });
+                        self.moving =
+                            Some(MoveDrag { index: idx, grab: ip, current: ip, original, handle });
                         // Re-render without the dragged vector annotation; it is
                         // drawn as an overlay until the drop. Pixel effects stay
                         // in the composite and update in place below.
@@ -580,8 +625,7 @@ impl NotelyApp {
                     if let Some(m) = &self.moving {
                         if is_pixel_effect(&m.original) {
                             let idx = m.index;
-                            let mut ann = m.original.clone();
-                            ann.translate(m.current - m.grab);
+                            let ann = m.preview();
                             if idx < self.annotations.len() {
                                 self.annotations[idx] = ann;
                             }
@@ -686,8 +730,7 @@ impl NotelyApp {
             // start is treated as a no-op.
             let delta = m.current - m.grab;
             if delta.length() > 0.5 / self.view_scale {
-                let mut ann = m.original.clone();
-                ann.translate(delta);
+                let ann = m.preview();
                 self.undo.push(Edit::Replace {
                     index: m.index,
                     old: m.original.clone(),
@@ -872,8 +915,13 @@ impl NotelyApp {
             self.draw_selection(&painter);
 
             if self.tool == Tool::Select {
-                let cursor = if self.moving.is_some() {
-                    Some(egui::CursorIcon::Grabbing)
+                let cursor = if let Some(m) = &self.moving {
+                    Some(match m.handle {
+                        Some((h, _)) => handle_cursor(h),
+                        None => egui::CursorIcon::Grabbing,
+                    })
+                } else if let Some(h) = response.hover_pos().and_then(|p| self.handle_at(p)) {
+                    Some(handle_cursor(h))
                 } else if response.hover_pos().is_some_and(|p| {
                     self.hit_test(self.screen_to_img(p), 5.0 / self.view_scale).is_some()
                 }) {
@@ -951,9 +999,7 @@ impl NotelyApp {
         if is_pixel_effect(&m.original) {
             return;
         }
-        let mut ann = m.original.clone();
-        ann.translate(m.current - m.grab);
-        self.paint_annotation(painter, &ann);
+        self.paint_annotation(painter, &m.preview());
     }
 
     /// Paint an arrow given in image space with the same geometry as the export.
@@ -1049,24 +1095,37 @@ impl NotelyApp {
         if self.tool != Tool::Select {
             return;
         }
-        // While moving, outline the annotation at its dragged position.
+        // While moving/resizing, outline the annotation at its dragged geometry.
         let ann = if let Some(m) = &self.moving {
-            let mut a = m.original.clone();
-            a.translate(m.current - m.grab);
-            a
+            m.preview()
         } else {
             match self.selected.and_then(|i| self.annotations.get(i)) {
                 Some(a) => a.clone(),
                 None => return,
             }
         };
-        let b = ann.bounds(self.font.as_ref());
-        let rect = Rect::from_min_max(self.img_to_screen(b.min), self.img_to_screen(b.max)).expand(4.0);
+        let rect = self.selection_rect(&ann);
         let accent = Color32::from_rgb(70, 150, 255);
         painter.rect_stroke(rect, 2.0, egui::Stroke::new(1.5_f32, accent), egui::StrokeKind::Outside);
-        for corner in [rect.left_top(), rect.right_top(), rect.left_bottom(), rect.right_bottom()] {
-            painter.rect_filled(Rect::from_center_size(corner, Vec2::splat(6.0)), 1.0, accent);
+        for h in Handle::ALL {
+            painter.rect_filled(Rect::from_center_size(h.pos(rect), Vec2::splat(HANDLE_SIZE)), 1.0, accent);
         }
+    }
+
+    /// Screen-space selection box drawn around `ann`.
+    fn selection_rect(&self, ann: &Annotation) -> Rect {
+        self.img_rect_to_screen(ann.bounds(self.font.as_ref())).expand(SELECTION_PAD)
+    }
+
+    /// The resize handle of the selected annotation under screen point `p`.
+    fn handle_at(&self, p: Pos2) -> Option<Handle> {
+        if self.tool != Tool::Select {
+            return None;
+        }
+        let rect = self.selection_rect(self.annotations.get(self.selected?)?);
+        Handle::ALL
+            .into_iter()
+            .find(|h| Rect::from_center_size(h.pos(rect), Vec2::splat(HANDLE_HIT)).contains(p))
     }
 
     fn text_window(&mut self, ctx: &Context) {

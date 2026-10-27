@@ -40,6 +40,43 @@ impl Tool {
     }
 }
 
+/// A corner resize handle of the selection box.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Handle {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl Handle {
+    pub const ALL: [Handle; 4] =
+        [Handle::TopLeft, Handle::TopRight, Handle::BottomLeft, Handle::BottomRight];
+
+    /// Position of this handle on `r`.
+    pub fn pos(self, r: Rect) -> Pos2 {
+        match self {
+            Handle::TopLeft => r.left_top(),
+            Handle::TopRight => r.right_top(),
+            Handle::BottomLeft => r.left_bottom(),
+            Handle::BottomRight => r.right_bottom(),
+        }
+    }
+
+    /// The diagonally opposite handle, which stays fixed while resizing.
+    pub fn opposite(self) -> Handle {
+        match self {
+            Handle::TopLeft => Handle::BottomRight,
+            Handle::TopRight => Handle::BottomLeft,
+            Handle::BottomLeft => Handle::TopRight,
+            Handle::BottomRight => Handle::TopLeft,
+        }
+    }
+}
+
+/// Smallest extent (image pixels) a resize may shrink a selection box to.
+const MIN_RESIZE_EXTENT: f32 = 2.0;
+
 /// A committed annotation. All coordinates are in image pixel space.
 #[derive(Clone)]
 pub enum Annotation {
@@ -108,15 +145,83 @@ impl Annotation {
         }
     }
 
+    /// Resize the annotation by dragging `handle` of its selection box `bounds`
+    /// by `delta` (image pixels), keeping the opposite corner fixed. Dragging
+    /// past the opposite corner mirrors the shape. Spotlights and text scale
+    /// uniformly so they keep their proportions.
+    pub fn resize(&mut self, bounds: Rect, handle: Handle, delta: Vec2) {
+        // Scale the geometry itself, not the stroke padding included in `bounds`.
+        let bounds = bounds.shrink(self.bounds_pad());
+        let anchor = handle.opposite().pos(bounds);
+        let old = handle.pos(bounds) - anchor;
+        let new = old + delta;
+        let clamp = |n: f32, o: f32| {
+            if n.abs() >= MIN_RESIZE_EXTENT {
+                n
+            } else {
+                MIN_RESIZE_EXTENT.copysign(if n != 0.0 { n } else { o })
+            }
+        };
+        let new = vec2(clamp(new.x, old.x), clamp(new.y, old.y));
+        let ratio = |n: f32, o: f32| if o.abs() > f32::EPSILON { n / o } else { 1.0 };
+        let scale = vec2(ratio(new.x, old.x), ratio(new.y, old.y));
+        let map = |p: Pos2| anchor + (p - anchor) * scale;
+        // Uniform factor (with per-axis mirroring) for shapes that keep their
+        // aspect ratio; returns the resulting selection frame.
+        let uniform_frame = |u: f32| {
+            let corner = anchor + old * vec2(u.copysign(scale.x), u.copysign(scale.y));
+            Rect::from_two_pos(anchor, corner)
+        };
+        let uniform = scale.x.abs().max(scale.y.abs());
+
+        match self {
+            Annotation::Arrow { from, to, .. } => {
+                *from = map(*from);
+                *to = map(*to);
+            }
+            Annotation::Rect { rect, .. }
+            | Annotation::Ellipse { rect, .. }
+            | Annotation::Blur { rect, .. } => {
+                *rect = Rect::from_two_pos(map(rect.min), map(rect.max));
+            }
+            Annotation::Highlight { points, .. } => {
+                for p in points.iter_mut() {
+                    *p = map(*p);
+                }
+            }
+            Annotation::Spot { center, radius } => {
+                let u = uniform.max(2.0 / radius.max(f32::EPSILON));
+                let frame = uniform_frame(u);
+                *center = frame.center();
+                *radius *= u;
+            }
+            Annotation::Text { pos, size, .. } => {
+                let u = uniform.max(4.0 / size.max(f32::EPSILON));
+                *pos = uniform_frame(u).min;
+                *size *= u;
+            }
+        }
+    }
+
+    /// Padding `bounds` adds around stroked point geometry.
+    fn bounds_pad(&self) -> f32 {
+        match self {
+            Annotation::Arrow { width, .. } | Annotation::Highlight { width, .. } => {
+                width * 0.5 + 1.0
+            }
+            _ => 0.0,
+        }
+    }
+
     /// Approximate bounding box in image space, used for the selection outline.
     pub fn bounds(&self, font: Option<&FontRef<'static>>) -> Rect {
         match self {
-            Annotation::Arrow { from, to, width, .. } => {
-                Rect::from_two_pos(*from, *to).expand(width * 0.5 + 1.0)
+            Annotation::Arrow { from, to, .. } => {
+                Rect::from_two_pos(*from, *to).expand(self.bounds_pad())
             }
             Annotation::Rect { rect, .. } | Annotation::Ellipse { rect, .. } => *rect,
-            Annotation::Highlight { points, width, .. } => {
-                points_bounds(points).expand(width * 0.5 + 1.0)
+            Annotation::Highlight { points, .. } => {
+                points_bounds(points).expand(self.bounds_pad())
             }
             Annotation::Blur { rect, .. } => *rect,
             Annotation::Spot { center, radius } => {
@@ -242,5 +347,41 @@ mod tests {
         assert!(b.width() > 20.0 && b.height() > 0.0);
         assert!(text.hit(b.center(), 0.0, font.as_ref()));
         assert!(!text.hit(Pos2::new(1000.0, 1000.0), 0.0, font.as_ref()));
+    }
+
+    #[test]
+    fn resize_keeps_opposite_corner() {
+        let r = Rect::from_min_max(Pos2::new(10.0, 10.0), Pos2::new(50.0, 30.0));
+        let mut rect = Annotation::Rect { rect: r, color: [0, 0, 0, 255], width: 2.0 };
+        rect.resize(r, Handle::BottomRight, egui::vec2(40.0, 20.0));
+        let b = rect.bounds(None);
+        assert_eq!(b.min, Pos2::new(10.0, 10.0));
+        assert_eq!(b.max, Pos2::new(90.0, 50.0));
+
+        // Dragging past the anchor mirrors instead of inverting the rect.
+        let mut rect = Annotation::Rect { rect: r, color: [0, 0, 0, 255], width: 2.0 };
+        rect.resize(r, Handle::TopLeft, egui::vec2(60.0, 0.0));
+        let b = rect.bounds(None);
+        assert_eq!(b.min, Pos2::new(50.0, 10.0));
+        assert_eq!(b.max, Pos2::new(70.0, 30.0));
+
+        let mut arrow = Annotation::Arrow {
+            from: Pos2::new(0.0, 100.0),
+            to: Pos2::new(100.0, 0.0),
+            color: [0, 0, 0, 255],
+            width: 4.0,
+        };
+        let b = arrow.bounds(None);
+        arrow.resize(b, Handle::TopRight, egui::vec2(b.width(), 0.0));
+        let Annotation::Arrow { from, to, .. } = arrow else { unreachable!() };
+        assert!((from - Pos2::new(0.0, 100.0)).length() < 1e-3);
+        assert!((to.x - 206.0).abs() < 1e-3 && to.y.abs() < 1e-3);
+
+        let mut spot = Annotation::Spot { center: Pos2::new(50.0, 50.0), radius: 10.0 };
+        let b = spot.bounds(None);
+        spot.resize(b, Handle::BottomRight, egui::vec2(20.0, 0.0));
+        let Annotation::Spot { center, radius } = spot else { unreachable!() };
+        assert!((radius - 20.0).abs() < 1e-3);
+        assert!((center - Pos2::new(60.0, 60.0)).length() < 1e-3);
     }
 }

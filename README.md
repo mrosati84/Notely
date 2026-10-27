@@ -10,7 +10,7 @@ Notely is a small native desktop app written in Rust with [egui](https://github.
 - **Styling:** color presets, plus size, blur strength and line width controls
 - **Input:** open a file, drag and drop, or paste from the clipboard
 - **Output:** copy the annotated image to the clipboard, or save it as PNG or JPEG
-- **Editing:** select and delete annotations, with full undo and redo
+- **Editing:** select, move, resize (drag a corner handle) and delete annotations, with full undo and redo
 - **macOS:** drop images onto the Dock icon, or use *Open With → Notely*
 
 Supported input formats: PNG, JPEG, GIF, BMP, WebP and TIFF.
