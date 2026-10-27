@@ -221,20 +221,13 @@ fn draw_ellipse(pm: &mut Pixmap, rect: Rect, color: [u8; 4], width: f32) {
     }
 }
 
-fn draw_arrow(pm: &mut Pixmap, from: Pos2, to: Pos2, color: [u8; 4], width: f32) {
-    if let Some(path) = {
-        let mut pb = PathBuilder::new();
-        pb.move_to(from.x, from.y);
-        pb.line_to(to.x, to.y);
-        pb.finish()
-    } {
-        pm.stroke_path(&path, &paint_rgba(color), &stroke_of(width), Transform::identity(), None);
-    }
-
+/// Arrow head triangle `[tip, left, right]` in image space. Shared by the
+/// export renderer and the on-screen overlays so they always match.
+pub fn arrow_head(from: Pos2, to: Pos2, width: f32) -> Option<[Pos2; 3]> {
     let dir = to - from;
     let len = dir.length();
     if len < 1.0 {
-        return;
+        return None;
     }
     let dir = dir / len;
     // `f32::clamp` panics when the minimum exceeds the maximum; short arrows
@@ -242,8 +235,33 @@ fn draw_arrow(pm: &mut Pixmap, from: Pos2, to: Pos2, color: [u8; 4], width: f32)
     let head = (width * 4.5).max(10.0).min(len * 0.6);
     let perp = egui::vec2(-dir.y, dir.x);
     let base = to - dir * head;
-    let left = base + perp * (head * 0.45);
-    let right = base - perp * (head * 0.45);
+    Some([to, base + perp * (head * 0.45), base - perp * (head * 0.45)])
+}
+
+/// Where the arrow's line should stop: the base of the head, so the line's
+/// width never pokes out past the narrowing tip. The round cap overlaps into
+/// the head, leaving no seam.
+pub fn arrow_shaft_end(from: Pos2, to: Pos2, width: f32) -> Pos2 {
+    match arrow_head(from, to, width) {
+        Some([_, left, right]) => left + (right - left) / 2.0,
+        None => to,
+    }
+}
+
+fn draw_arrow(pm: &mut Pixmap, from: Pos2, to: Pos2, color: [u8; 4], width: f32) {
+    let end = arrow_shaft_end(from, to, width);
+    if let Some(path) = {
+        let mut pb = PathBuilder::new();
+        pb.move_to(from.x, from.y);
+        pb.line_to(end.x, end.y);
+        pb.finish()
+    } {
+        pm.stroke_path(&path, &paint_rgba(color), &stroke_of(width), Transform::identity(), None);
+    }
+
+    let Some([to, left, right]) = arrow_head(from, to, width) else {
+        return;
+    };
 
     if let Some(path) = {
         let mut pb = PathBuilder::new();
@@ -479,6 +497,24 @@ mod tests {
             }];
             let out = render(&base(), &anns, None, None);
             assert_eq!(out.dimensions(), (520, 360));
+        }
+    }
+
+    #[test]
+    fn arrow_line_does_not_poke_past_tip() {
+        let bg = RgbaImage::from_pixel(200, 100, image::Rgba([255, 255, 255, 255]));
+        let anns = vec![Annotation::Arrow {
+            from: pos2(20.0, 50.0),
+            to: pos2(150.0, 50.0),
+            color: [255, 0, 0, 255],
+            width: 12.0,
+        }];
+        let out = render(&bg, &anns, None, None);
+        // Just behind the tip, off-axis by more than the head's half-width
+        // there but within the line's half-width.
+        for (x, y) in [(147, 45), (147, 55), (153, 50)] {
+            let p = out.get_pixel(x, y).0;
+            assert!(p[1] > 200, "line visible past arrow head at ({x},{y}): {p:?}");
         }
     }
 }

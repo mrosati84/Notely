@@ -898,7 +898,7 @@ impl NotelyApp {
 
         match d.tool {
             Tool::Arrow => {
-                painter.arrow(a, b - a, stroke);
+                self.paint_arrow(painter, d.start, d.current, self.width, self.color);
             }
             Tool::Rect => {
                 painter.rect_stroke(Rect::from_two_pos(a, b), 0.0, stroke, egui::StrokeKind::Middle);
@@ -956,14 +956,30 @@ impl NotelyApp {
         self.paint_annotation(painter, &ann);
     }
 
+    /// Paint an arrow given in image space with the same geometry as the export.
+    fn paint_arrow(&self, painter: &egui::Painter, from: Pos2, to: Pos2, width: f32, color: Color32) {
+        let a = self.img_to_screen(from);
+        let b = self.img_to_screen(render::arrow_shaft_end(from, to, width));
+        let w = (width * self.view_scale).max(1.0);
+        painter.line_segment([a, b], egui::Stroke::new(w, color));
+        // The export strokes with round caps; mirror that at both ends.
+        painter.circle_filled(a, w / 2.0, color);
+        painter.circle_filled(b, w / 2.0, color);
+        if let Some(head) = render::arrow_head(from, to, width) {
+            painter.add(egui::Shape::convex_polygon(
+                head.map(|p| self.img_to_screen(p)).to_vec(),
+                color,
+                egui::Stroke::NONE,
+            ));
+        }
+    }
+
     fn paint_annotation(&self, painter: &egui::Painter, ann: &Annotation) {
         let s = self.view_scale;
         let rgba = |c: &[u8; 4]| Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
         match ann {
             Annotation::Arrow { from, to, color, width } => {
-                let a = self.img_to_screen(*from);
-                let b = self.img_to_screen(*to);
-                painter.arrow(a, b - a, egui::Stroke::new((*width * s).max(1.0), rgba(color)));
+                self.paint_arrow(painter, *from, *to, *width, rgba(color));
             }
             Annotation::Rect { rect, color, width } => {
                 painter.rect_stroke(
