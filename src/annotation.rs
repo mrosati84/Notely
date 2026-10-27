@@ -230,7 +230,7 @@ mod tests {
         assert!(ellipse.hit(Pos2::new(50.0, 25.0), 1.0, None));
         assert!(!ellipse.hit(Pos2::new(98.0, 48.0), 1.0, None));
 
-        let font = FontRef::try_from_slice(epaint_default_fonts::UBUNTU_LIGHT).ok();
+        let font = FontRef::try_from_slice(crate::fonts::INTER_REGULAR).ok();
         assert!(font.is_some());
         let text = Annotation::Text {
             pos: Pos2::new(0.0, 0.0),

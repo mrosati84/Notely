@@ -76,3 +76,5 @@ macos/            Info.plist additions (image document types)
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+The bundled [Inter](https://rsms.me/inter/) font (`assets/fonts/Inter-Regular.ttf`) is licensed under the SIL Open Font License 1.1. See [assets/fonts/Inter-LICENSE.txt](assets/fonts/Inter-LICENSE.txt).

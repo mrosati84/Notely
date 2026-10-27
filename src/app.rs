@@ -88,6 +88,7 @@ const PRESETS: [Color32; 8] = [
 impl NotelyApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        crate::fonts::install(&cc.egui_ctx);
 
         let checker = cc.egui_ctx.load_texture(
             "checker",
@@ -95,7 +96,7 @@ impl NotelyApp {
             TextureOptions::NEAREST_REPEAT,
         );
 
-        let font = FontRef::try_from_slice(epaint_default_fonts::UBUNTU_LIGHT).ok();
+        let font = FontRef::try_from_slice(crate::fonts::INTER_REGULAR).ok();
 
         #[cfg(target_os = "macos")]
         crate::macos_open::set_context(cc.egui_ctx.clone());

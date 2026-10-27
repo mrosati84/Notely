@@ -2,6 +2,7 @@
 
 mod annotation;
 mod app;
+mod fonts;
 #[cfg(target_os = "macos")]
 mod macos_open;
 #[cfg(target_os = "macos")]

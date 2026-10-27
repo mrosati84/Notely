@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn renders_all_tools() {
-        let font = FontRef::try_from_slice(epaint_default_fonts::UBUNTU_LIGHT).ok();
+        let font = FontRef::try_from_slice(crate::fonts::INTER_REGULAR).ok();
         let anns = vec![
             Annotation::Rect { rect: Rect::from_min_max(pos2(40.0, 40.0), pos2(200.0, 150.0)), color: [255, 60, 60, 255], width: 6.0 },
             Annotation::Ellipse { rect: Rect::from_min_max(pos2(240.0, 40.0), pos2(400.0, 150.0)), color: [60, 220, 120, 255], width: 6.0 },
