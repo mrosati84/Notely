@@ -719,18 +719,19 @@ impl NotelyApp {
     }
 
     /// Commit an in-progress move. History is only touched when the annotation
-    /// actually moved, so a mere press (or long-press without movement) leaves
+    /// actually changed, so a mere press (or long-press without movement) leaves
     /// the redo stack intact.
     fn end_move(&mut self) {
         let Some(m) = self.moving.take() else {
             return;
         };
         if m.index < self.annotations.len() {
-            // Decide from the final offset, so dragging away and back to the
-            // start is treated as a no-op.
+            let ann = m.preview();
+            // Require both pointer movement and a real geometry change: a
+            // one-axis text/spot drag used to be a no-op that still pushed a
+            // history entry and cleared redo.
             let delta = m.current - m.grab;
-            if delta.length() > 0.5 / self.view_scale {
-                let ann = m.preview();
+            if delta.length() > 0.5 / self.view_scale && ann != m.original {
                 self.undo.push(Edit::Replace {
                     index: m.index,
                     old: m.original.clone(),

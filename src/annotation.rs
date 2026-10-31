@@ -78,7 +78,7 @@ impl Handle {
 const MIN_RESIZE_EXTENT: f32 = 2.0;
 
 /// A committed annotation. All coordinates are in image pixel space.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum Annotation {
     Arrow {
         from: Pos2,
@@ -172,7 +172,13 @@ impl Annotation {
             let corner = anchor + old * vec2(u.copysign(scale.x), u.copysign(scale.y));
             Rect::from_two_pos(anchor, corner)
         };
-        let uniform = scale.x.abs().max(scale.y.abs());
+        // Follow the axis that changed most, not the larger absolute scale.
+        // The unchanged axis is always 1.0, so a plain `max` would prevent a
+        // text/spot from being shrunk by dragging a single axis inwards.
+        let changed_x = (scale.x.abs() - 1.0).abs();
+        let changed_y = (scale.y.abs() - 1.0).abs();
+        let uniform =
+            if changed_x >= changed_y { scale.x.abs() } else { scale.y.abs() };
 
         match self {
             Annotation::Arrow { from, to, .. } => {
@@ -383,5 +389,41 @@ mod tests {
         let Annotation::Spot { center, radius } = spot else { unreachable!() };
         assert!((radius - 20.0).abs() < 1e-3);
         assert!((center - Pos2::new(60.0, 60.0)).length() < 1e-3);
+    }
+
+    #[test]
+    fn uniform_shapes_shrink_on_one_axis() {
+        // A strictly horizontal inward drag must still shrink a spotlight.
+        let mut spot = Annotation::Spot { center: Pos2::new(50.0, 50.0), radius: 10.0 };
+        let b = spot.bounds(None);
+        spot.resize(b, Handle::BottomRight, egui::vec2(-10.0, 0.0));
+        let Annotation::Spot { center, radius } = spot else { unreachable!() };
+        assert!((radius - 5.0).abs() < 1e-3, "radius was {radius}");
+        assert!((center - Pos2::new(45.0, 45.0)).length() < 1e-3, "center was {center:?}");
+
+        // Same for text: pulling the right handle left shrinks it uniformly.
+        let mut text = Annotation::Text {
+            pos: Pos2::new(0.0, 0.0),
+            text: "hello".to_owned(),
+            color: [0, 0, 0, 255],
+            size: 40.0,
+        };
+        let b = text.bounds(None);
+        text.resize(b, Handle::TopRight, egui::vec2(-10.0, 0.0));
+        let Annotation::Text { pos, size, .. } = text else { unreachable!() };
+        assert!((size - 36.0).abs() < 1e-3, "size was {size}");
+        assert!((pos.x - 0.0).abs() < 1e-3 && (pos.y - 4.8).abs() < 1e-3, "pos was {pos:?}");
+
+        // A strictly vertical inward drag works too.
+        let mut text = Annotation::Text {
+            pos: Pos2::new(0.0, 0.0),
+            text: "hello".to_owned(),
+            color: [0, 0, 0, 255],
+            size: 40.0,
+        };
+        let b = text.bounds(None);
+        text.resize(b, Handle::BottomRight, egui::vec2(0.0, -4.8));
+        let Annotation::Text { size, .. } = text else { unreachable!() };
+        assert!((size - 36.0).abs() < 1e-3, "size was {size}");
     }
 }
