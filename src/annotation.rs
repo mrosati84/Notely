@@ -156,7 +156,10 @@ impl Annotation {
         let old = handle.pos(bounds) - anchor;
         let new = old + delta;
         let clamp = |n: f32, o: f32| {
-            if n.abs() >= MIN_RESIZE_EXTENT {
+            if n == 0.0 && o == 0.0 {
+                // Keep a flat edge flat when the other axis is being resized.
+                0.0
+            } else if n.abs() >= MIN_RESIZE_EXTENT {
                 n
             } else {
                 MIN_RESIZE_EXTENT.copysign(if n != 0.0 { n } else { o })
@@ -166,6 +169,34 @@ impl Annotation {
         let ratio = |n: f32, o: f32| if o.abs() > f32::EPSILON { n / o } else { 1.0 };
         let scale = vec2(ratio(new.x, old.x), ratio(new.y, old.y));
         let map = |p: Pos2| anchor + (p - anchor) * scale;
+        // A perfectly straight arrow/highlight has a zero-extent axis, so
+        // scaling cannot create a height/width. Treat such an axis as a shear:
+        // points on the dragged side follow the handle, points on the anchored
+        // side stay put.
+        let flat_x = old.x.abs() < 1e-3;
+        let flat_y = old.y.abs() < 1e-3;
+        let dragged_right = matches!(handle, Handle::TopRight | Handle::BottomRight);
+        let dragged_bottom = matches!(handle, Handle::BottomLeft | Handle::BottomRight);
+        let resize_point = |p: Pos2| {
+            let mut q = map(p);
+            if flat_y && !flat_x {
+                let t = if dragged_right {
+                    (p.x - bounds.min.x) / bounds.width()
+                } else {
+                    (bounds.max.x - p.x) / bounds.width()
+                };
+                q.y = anchor.y + new.y * t;
+            } else if flat_x && !flat_y {
+                let t = if dragged_bottom {
+                    (p.y - bounds.min.y) / bounds.height()
+                } else {
+                    (bounds.max.y - p.y) / bounds.height()
+                };
+                q.x = anchor.x + new.x * t;
+            }
+            q
+        };
+        let frame = Rect::from_two_pos(anchor, anchor + new);
         // Uniform factor (with per-axis mirroring) for shapes that keep their
         // aspect ratio; returns the resulting selection frame.
         let uniform_frame = |u: f32| {
@@ -182,17 +213,19 @@ impl Annotation {
 
         match self {
             Annotation::Arrow { from, to, .. } => {
-                *from = map(*from);
-                *to = map(*to);
+                *from = resize_point(*from);
+                *to = resize_point(*to);
             }
             Annotation::Rect { rect, .. }
             | Annotation::Ellipse { rect, .. }
             | Annotation::Blur { rect, .. } => {
-                *rect = Rect::from_two_pos(map(rect.min), map(rect.max));
+                // Deriving the frame directly from the anchor also handles a
+                // rectangle created with zero width or height.
+                *rect = frame;
             }
             Annotation::Highlight { points, .. } => {
                 for p in points.iter_mut() {
-                    *p = map(*p);
+                    *p = resize_point(*p);
                 }
             }
             Annotation::Spot { center, radius } => {
@@ -425,5 +458,88 @@ mod tests {
         text.resize(b, Handle::BottomRight, egui::vec2(0.0, -4.8));
         let Annotation::Text { size, .. } = text else { unreachable!() };
         assert!((size - 36.0).abs() < 1e-3, "size was {size}");
+    }
+
+    #[test]
+    fn straight_lines_resize_perpendicular_to_their_axis() {
+        // Horizontal arrow: dragging the bottom-right handle down tilts it.
+        let mut arrow = Annotation::Arrow {
+            from: Pos2::new(0.0, 50.0),
+            to: Pos2::new(100.0, 50.0),
+            color: [0, 0, 0, 255],
+            width: 4.0,
+        };
+        let b = arrow.bounds(None);
+        arrow.resize(b, Handle::BottomRight, egui::vec2(0.0, 20.0));
+        let Annotation::Arrow { from, to, .. } = arrow else { unreachable!() };
+        assert!((from - Pos2::new(0.0, 50.0)).length() < 1e-3, "from was {from:?}");
+        assert!((to - Pos2::new(100.0, 70.0)).length() < 1e-3, "to was {to:?}");
+
+        // The opposite handle moves the opposite endpoint.
+        let mut arrow = Annotation::Arrow {
+            from: Pos2::new(0.0, 50.0),
+            to: Pos2::new(100.0, 50.0),
+            color: [0, 0, 0, 255],
+            width: 4.0,
+        };
+        let b = arrow.bounds(None);
+        arrow.resize(b, Handle::TopLeft, egui::vec2(0.0, -20.0));
+        let Annotation::Arrow { from, to, .. } = arrow else { unreachable!() };
+        assert!((from - Pos2::new(0.0, 30.0)).length() < 1e-3, "from was {from:?}");
+        assert!((to - Pos2::new(100.0, 50.0)).length() < 1e-3, "to was {to:?}");
+
+        // Vertical arrow: dragging right widens it at the bottom endpoint.
+        let mut arrow = Annotation::Arrow {
+            from: Pos2::new(50.0, 0.0),
+            to: Pos2::new(50.0, 100.0),
+            color: [0, 0, 0, 255],
+            width: 4.0,
+        };
+        let b = arrow.bounds(None);
+        arrow.resize(b, Handle::BottomRight, egui::vec2(20.0, 0.0));
+        let Annotation::Arrow { from, to, .. } = arrow else { unreachable!() };
+        assert!((from - Pos2::new(50.0, 0.0)).length() < 1e-3, "from was {from:?}");
+        assert!((to - Pos2::new(70.0, 100.0)).length() < 1e-3, "to was {to:?}");
+
+        // A straight highlight is sheared the same way.
+        let mut highlight = Annotation::Highlight {
+            points: vec![Pos2::new(0.0, 50.0), Pos2::new(50.0, 50.0), Pos2::new(100.0, 50.0)],
+            color: [0, 0, 0, 255],
+            width: 10.0,
+        };
+        let b = highlight.bounds(None);
+        highlight.resize(b, Handle::BottomRight, egui::vec2(0.0, 20.0));
+        let Annotation::Highlight { points, .. } = highlight else { unreachable!() };
+        assert!((points[0] - Pos2::new(0.0, 50.0)).length() < 1e-3, "{points:?}");
+        assert!((points[1] - Pos2::new(50.0, 60.0)).length() < 1e-3, "{points:?}");
+        assert!((points[2] - Pos2::new(100.0, 70.0)).length() < 1e-3, "{points:?}");
+    }
+
+    #[test]
+    fn degenerate_rect_resizes_on_its_empty_axis() {
+        // A rectangle drawn with a purely vertical drag has zero width; it can
+        // still be widened again with a handle.
+        let mut rect = Annotation::Rect {
+            rect: Rect::from_min_max(Pos2::new(50.0, 10.0), Pos2::new(50.0, 40.0)),
+            color: [0, 0, 0, 255],
+            width: 4.0,
+        };
+        let b = rect.bounds(None);
+        rect.resize(b, Handle::BottomRight, egui::vec2(20.0, 0.0));
+        let Annotation::Rect { rect, .. } = rect else { unreachable!() };
+        assert!((rect.width() - 20.0).abs() < 1e-3, "rect was {rect:?}");
+        assert!((rect.min.x - 50.0).abs() < 1e-3 && (rect.max.x - 70.0).abs() < 1e-3);
+
+        // Resizing the other axis must not force the flat axis open.
+        let mut rect = Annotation::Rect {
+            rect: Rect::from_min_max(Pos2::new(50.0, 10.0), Pos2::new(50.0, 40.0)),
+            color: [0, 0, 0, 255],
+            width: 4.0,
+        };
+        let b = rect.bounds(None);
+        rect.resize(b, Handle::BottomRight, egui::vec2(0.0, 10.0));
+        let Annotation::Rect { rect, .. } = rect else { unreachable!() };
+        assert!(rect.width().abs() < 1e-3, "rect was {rect:?}");
+        assert!((rect.height() - 40.0).abs() < 1e-3, "rect was {rect:?}");
     }
 }
