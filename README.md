@@ -28,7 +28,7 @@ Supported input formats: PNG, JPEG, GIF, BMP, WebP and TIFF.
 | `Cmd/Ctrl+S` | Save as PNG or JPEG |
 | `Cmd/Ctrl+Z` | Undo |
 | `Cmd/Ctrl+Shift+Z` | Redo |
-| `Delete` / `Backspace` | Delete the selected annotation, or clear all annotations if none is selected |
+| `Delete` / `Backspace` | Delete the selected annotation |
 | `Esc` | Deselect |
 
 ## Building

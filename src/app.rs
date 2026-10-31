@@ -453,6 +453,14 @@ impl NotelyApp {
         )
     }
 
+    /// Clamp an image-space point to the loaded image's bounds.
+    fn img_clamped(&self, p: Pos2) -> Pos2 {
+        match &self.base {
+            Some(base) => clamp_to_image(p, base.width(), base.height()),
+            None => p,
+        }
+    }
+
     // -- input -------------------------------------------------------------
 
     fn handle_dropped(&mut self, ctx: &Context) {
@@ -572,15 +580,19 @@ impl NotelyApp {
         }
     }
 
-    fn handle_canvas_input(&mut self, response: &egui::Response) {
+    fn handle_canvas_input(&mut self, response: &egui::Response, img_rect: Rect) {
         if self.text_state.is_some() {
             return;
         }
         if self.tool == Tool::Text {
             if response.clicked() {
-                if let Some(p) = response.interact_pointer_pos() {
-                    let ip = self.screen_to_img(p);
-                    self.text_state = Some(TextState { pos: ip, buffer: String::new(), focused: false });
+                let origin = response.ctx.input(|i| i.pointer.press_origin());
+                if let Some(p) = origin.or(response.interact_pointer_pos()) {
+                    if img_rect.contains(p) {
+                        let ip = self.screen_to_img(p);
+                        self.text_state =
+                            Some(TextState { pos: ip, buffer: String::new(), focused: false });
+                    }
                 }
             }
             return;
@@ -652,14 +664,26 @@ impl NotelyApp {
         }
 
         if response.drag_started() {
-            if let Some(p) = response.interact_pointer_pos() {
-                let ip = self.screen_to_img(p);
-                self.drag = Some(Drag { tool: self.tool, start: ip, current: ip, points: vec![ip] });
+            // The drag threshold may be crossed after the pointer has left the
+            // image; decide from the press origin so a gesture that started on
+            // the image still works, but a gesture that started in the padding
+            // never creates an out-of-image annotation.
+            let origin = response.ctx.input(|i| i.pointer.press_origin());
+            if let Some(p) = origin.or(response.interact_pointer_pos()) {
+                if img_rect.contains(p) {
+                    let start = self.img_clamped(self.screen_to_img(p));
+                    let current = response
+                        .interact_pointer_pos()
+                        .map(|q| self.img_clamped(self.screen_to_img(q)))
+                        .unwrap_or(start);
+                    self.drag =
+                        Some(Drag { tool: self.tool, start, current, points: vec![start] });
+                }
             }
         }
         if response.dragged() {
             if let Some(p) = response.interact_pointer_pos() {
-                let ip = self.screen_to_img(p);
+                let ip = self.img_clamped(self.screen_to_img(p));
                 if let Some(d) = &mut self.drag {
                     d.current = ip;
                     if d.tool == Tool::Highlight {
@@ -895,7 +919,7 @@ impl NotelyApp {
 
             // Handle input first so a rebuild triggered here (drag start, edit)
             // reaches the texture before it is painted this same frame.
-            self.handle_canvas_input(&response);
+            self.handle_canvas_input(&response, img_rect);
             if self.dirty {
                 self.rebuild(ctx);
             }
@@ -1288,4 +1312,30 @@ fn make_checker() -> ColorImage {
         }
     }
     ColorImage { size: [SIZE, SIZE], pixels }
+}
+
+/// Keep drawing coordinates inside the image instead of letting a gesture that
+/// runs into the dark padding create negative or out-of-range annotations.
+fn clamp_to_image(p: Pos2, width: u32, height: u32) -> Pos2 {
+    Pos2::new(
+        p.x.clamp(0.0, width as f32),
+        p.y.clamp(0.0, height as f32),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamps_drawing_positions_to_the_image() {
+        assert_eq!(
+            clamp_to_image(Pos2::new(-5.0, 150.0), 100, 120),
+            Pos2::new(0.0, 120.0)
+        );
+        assert_eq!(
+            clamp_to_image(Pos2::new(40.0, 60.0), 100, 120),
+            Pos2::new(40.0, 60.0)
+        );
+    }
 }
