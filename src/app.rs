@@ -5,7 +5,7 @@ use egui::{
 };
 use image::RgbaImage;
 
-use crate::annotation::{Annotation, Handle, Tool};
+use crate::annotation::{arrow_head, arrow_shaft_end, Annotation, Handle, Tool};
 use crate::render;
 
 struct Drag {
@@ -1006,13 +1006,13 @@ impl NotelyApp {
     /// Paint an arrow given in image space with the same geometry as the export.
     fn paint_arrow(&self, painter: &egui::Painter, from: Pos2, to: Pos2, width: f32, color: Color32) {
         let a = self.img_to_screen(from);
-        let b = self.img_to_screen(render::arrow_shaft_end(from, to, width));
+        let b = self.img_to_screen(arrow_shaft_end(from, to, width));
         let w = (width * self.view_scale).max(1.0);
         painter.line_segment([a, b], egui::Stroke::new(w, color));
         // The export strokes with round caps; mirror that at both ends.
         painter.circle_filled(a, w / 2.0, color);
         painter.circle_filled(b, w / 2.0, color);
-        if let Some(head) = render::arrow_head(from, to, width) {
+        if let Some(head) = arrow_head(from, to, width) {
             painter.add(egui::Shape::convex_polygon(
                 head.map(|p| self.img_to_screen(p)).to_vec(),
                 color,
@@ -1115,7 +1115,7 @@ impl NotelyApp {
 
     /// Screen-space selection box drawn around `ann`.
     fn selection_rect(&self, ann: &Annotation) -> Rect {
-        self.img_rect_to_screen(ann.bounds(self.font.as_ref())).expand(SELECTION_PAD)
+        self.img_rect_to_screen(ann.selection_bounds(self.font.as_ref())).expand(SELECTION_PAD)
     }
 
     /// The resize handle of the selected annotation under screen point `p`.

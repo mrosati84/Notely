@@ -5,7 +5,7 @@ use tiny_skia::{
     Color, FillRule, IntSize, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform,
 };
 
-use crate::annotation::Annotation;
+use crate::annotation::{arrow_head, arrow_shaft_end, Annotation};
 
 /// Render the base image together with every annotation into a new RGBA image.
 ///
@@ -218,33 +218,6 @@ fn draw_ellipse(pm: &mut Pixmap, rect: Rect, color: [u8; 4], width: f32) {
         if let Some(path) = PathBuilder::from_oval(r) {
             pm.stroke_path(&path, &paint_rgba(color), &stroke_of(width), Transform::identity(), None);
         }
-    }
-}
-
-/// Arrow head triangle `[tip, left, right]` in image space. Shared by the
-/// export renderer and the on-screen overlays so they always match.
-pub fn arrow_head(from: Pos2, to: Pos2, width: f32) -> Option<[Pos2; 3]> {
-    let dir = to - from;
-    let len = dir.length();
-    if len < 1.0 {
-        return None;
-    }
-    let dir = dir / len;
-    // `f32::clamp` panics when the minimum exceeds the maximum; short arrows
-    // (len * 0.6 < 10) would invert the bounds. Compose max/min instead.
-    let head = (width * 4.5).max(10.0).min(len * 0.6);
-    let perp = egui::vec2(-dir.y, dir.x);
-    let base = to - dir * head;
-    Some([to, base + perp * (head * 0.45), base - perp * (head * 0.45)])
-}
-
-/// Where the arrow's line should stop: the base of the head, so the line's
-/// width never pokes out past the narrowing tip. The round cap overlaps into
-/// the head, leaving no seam.
-pub fn arrow_shaft_end(from: Pos2, to: Pos2, width: f32) -> Pos2 {
-    match arrow_head(from, to, width) {
-        Some([_, left, right]) => left + (right - left) / 2.0,
-        None => to,
     }
 }
 

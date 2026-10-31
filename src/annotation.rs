@@ -252,17 +252,18 @@ impl Annotation {
         }
     }
 
-    /// Approximate bounding box in image space, used for the selection outline.
+    /// Approximate bounding box in image space, used for resize anchoring.
     pub fn bounds(&self, font: Option<&FontRef<'static>>) -> Rect {
         match self {
             Annotation::Arrow { from, to, .. } => {
                 Rect::from_two_pos(*from, *to).expand(self.bounds_pad())
             }
-            Annotation::Rect { rect, .. } | Annotation::Ellipse { rect, .. } => *rect,
+            Annotation::Rect { rect, .. }
+            | Annotation::Ellipse { rect, .. }
+            | Annotation::Blur { rect, .. } => *rect,
             Annotation::Highlight { points, .. } => {
                 points_bounds(points).expand(self.bounds_pad())
             }
-            Annotation::Blur { rect, .. } => *rect,
             Annotation::Spot { center, radius } => {
                 Rect::from_center_size(*center, vec2(radius * 2.0, radius * 2.0))
             }
@@ -273,17 +274,47 @@ impl Annotation {
         }
     }
 
+    /// Bounding box for the selection outline and handles. Unlike [`Self::bounds`]
+    /// this covers the whole visible shape: the stroke of rectangles/ellipses and
+    /// the arrowhead, both of which extend past the geometry.
+    pub fn selection_bounds(&self, font: Option<&FontRef<'static>>) -> Rect {
+        let mut rect = self.bounds(font);
+        match self {
+            Annotation::Rect { width, .. } | Annotation::Ellipse { width, .. } => {
+                rect = rect.expand(width * 0.5 + 1.0);
+            }
+            Annotation::Arrow { from, to, width, .. } => {
+                if let Some(head) = arrow_head(*from, *to, *width) {
+                    for p in head {
+                        rect.extend_with(p);
+                    }
+                }
+            }
+            _ => {}
+        }
+        rect
+    }
+
     /// Whether `p` (image space) is on/near the annotation, within `tol` pixels.
     pub fn hit(&self, p: Pos2, tol: f32, font: Option<&FontRef<'static>>) -> bool {
         match self {
             Annotation::Arrow { from, to, width, .. } => {
-                dist_to_segment(p, *from, *to) <= tol + width * 0.5 + 2.0
+                let on_shaft = dist_to_segment(p, *from, *to) <= tol + width * 0.5 + 2.0;
+                let on_head = arrow_head(*from, *to, *width).is_some_and(|[a, b, c]| {
+                    point_in_triangle(p, a, b, c)
+                        || dist_to_segment(p, a, b) <= tol
+                        || dist_to_segment(p, b, c) <= tol
+                        || dist_to_segment(p, c, a) <= tol
+                });
+                on_shaft || on_head
             }
-            Annotation::Rect { rect, .. } => rect.expand(tol).contains(p),
-            Annotation::Ellipse { rect, .. } => {
+            Annotation::Rect { rect, width, .. } => {
+                rect.expand(width * 0.5 + tol).contains(p)
+            }
+            Annotation::Ellipse { rect, width, .. } => {
                 let c = rect.center();
-                let rx = rect.width() * 0.5 + tol;
-                let ry = rect.height() * 0.5 + tol;
+                let rx = rect.width() * 0.5 + width * 0.5 + tol;
+                let ry = rect.height() * 0.5 + width * 0.5 + tol;
                 if rx <= 0.0 || ry <= 0.0 {
                     false
                 } else {
@@ -302,6 +333,43 @@ impl Annotation {
             Annotation::Text { .. } => self.bounds(font).expand(tol).contains(p),
         }
     }
+}
+
+/// Arrow head triangle `[tip, left, right]` in image space. Shared by the
+/// export renderer, hit testing and the on-screen overlays so they always match.
+pub fn arrow_head(from: Pos2, to: Pos2, width: f32) -> Option<[Pos2; 3]> {
+    let dir = to - from;
+    let len = dir.length();
+    if len < 1.0 {
+        return None;
+    }
+    let dir = dir / len;
+    // `f32::clamp` panics when the minimum exceeds the maximum; short arrows
+    // (len * 0.6 < 10) would invert the bounds. Compose max/min instead.
+    let head = (width * 4.5).max(10.0).min(len * 0.6);
+    let perp = vec2(-dir.y, dir.x);
+    let base = to - dir * head;
+    Some([to, base + perp * (head * 0.45), base - perp * (head * 0.45)])
+}
+
+/// Where the arrow's line should stop: the base of the head, so the line's
+/// width never pokes out past the narrowing tip. The round cap overlaps into
+/// the head, leaving no seam.
+pub fn arrow_shaft_end(from: Pos2, to: Pos2, width: f32) -> Pos2 {
+    match arrow_head(from, to, width) {
+        Some([_, left, right]) => left + (right - left) / 2.0,
+        None => to,
+    }
+}
+
+fn point_in_triangle(p: Pos2, a: Pos2, b: Pos2, c: Pos2) -> bool {
+    let cross = |u: Vec2, v: Vec2| u.x * v.y - u.y * v.x;
+    let d1 = cross(b - a, p - a);
+    let d2 = cross(c - b, p - b);
+    let d3 = cross(a - c, p - c);
+    let has_neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+    let has_pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+    !(has_neg && has_pos)
 }
 
 fn points_bounds(points: &[Pos2]) -> Rect {
@@ -541,5 +609,40 @@ mod tests {
         let Annotation::Rect { rect, .. } = rect else { unreachable!() };
         assert!(rect.width().abs() < 1e-3, "rect was {rect:?}");
         assert!((rect.height() - 40.0).abs() < 1e-3, "rect was {rect:?}");
+    }
+
+    #[test]
+    fn hit_and_selection_include_strokes_and_arrowheads() {
+        let rect = Annotation::Rect {
+            rect: Rect::from_min_max(Pos2::new(20.0, 20.0), Pos2::new(80.0, 80.0)),
+            color: [0, 0, 0, 255],
+            width: 20.0,
+        };
+        let on_stroke = Pos2::new(13.0, 50.0);
+        assert!(rect.hit(on_stroke, 0.0, None));
+        assert!(rect.selection_bounds(None).contains(on_stroke));
+        assert!(!rect.bounds(None).contains(on_stroke));
+        assert!(!rect.hit(Pos2::new(5.0, 50.0), 0.0, None));
+
+        let ellipse = Annotation::Ellipse {
+            rect: Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(100.0, 50.0)),
+            color: [0, 0, 0, 255],
+            width: 20.0,
+        };
+        let on_stroke = Pos2::new(50.0, -9.0);
+        assert!(ellipse.hit(on_stroke, 0.0, None));
+        assert!(ellipse.selection_bounds(None).contains(on_stroke));
+        assert!(!ellipse.hit(Pos2::new(50.0, -12.0), 0.0, None));
+
+        let arrow = Annotation::Arrow {
+            from: Pos2::new(0.0, 0.0),
+            to: Pos2::new(100.0, 0.0),
+            color: [0, 0, 0, 255],
+            width: 4.0,
+        };
+        let on_head = Pos2::new(85.0, 5.0);
+        assert!(arrow.hit(on_head, 0.0, None));
+        assert!(arrow.selection_bounds(None).contains(on_head));
+        assert!(!arrow.bounds(None).contains(on_head));
     }
 }
