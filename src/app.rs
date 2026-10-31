@@ -528,11 +528,16 @@ impl NotelyApp {
                 i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
                 i.key_pressed(egui::Key::S) && i.modifiers.command,
                 // On macOS an NSEvent monitor handles ⌘V for images (see
-                // macos_paste); elsewhere fall back to Event::Paste (text) or
-                // Key::V. A focused text field returned above, so this cannot
-                // hijack a paste into one.
-                i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
-                    || (i.key_pressed(egui::Key::V) && i.modifiers.command),
+                // macos_paste). egui-winit swallows the paste key-down and only
+                // emits Event::Paste for text, so elsewhere trigger on the
+                // key-up, which is still delivered. A focused text field
+                // returned above, so this cannot hijack a paste into one.
+                if cfg!(target_os = "macos") {
+                    i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
+                        || (i.key_pressed(egui::Key::V) && i.modifiers.command)
+                } else {
+                    i.key_released(egui::Key::V) && i.modifiers.command
+                },
                 i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
             )
         });
