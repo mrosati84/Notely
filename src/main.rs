@@ -3,11 +3,15 @@
 mod annotation;
 mod app;
 mod fonts;
+mod icons;
 #[cfg(target_os = "macos")]
 mod macos_open;
 #[cfg(target_os = "macos")]
 mod macos_paste;
 mod render;
+mod theme;
+mod view;
+mod widgets;
 
 fn window_icon() -> Option<egui::IconData> {
     let img = image::load_from_memory(include_bytes!("../icons/icon.png")).ok()?;

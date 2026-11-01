@@ -5,7 +5,7 @@ use tiny_skia::{
     Color, FillRule, IntSize, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform,
 };
 
-use crate::annotation::{arrow_head, arrow_shaft_end, Annotation};
+use crate::annotation::{arrow_head, arrow_shaft_end, layout_text, Annotation, MIN_HIGHLIGHT_WIDTH};
 
 /// Render the base image together with every annotation into a new RGBA image.
 ///
@@ -264,7 +264,7 @@ fn draw_highlight(pm: &mut Pixmap, points: &[Pos2], color: [u8; 4], width: f32) 
         let mut paint = Paint::default();
         paint.set_color(Color::from_rgba8(color[0], color[1], color[2], 90));
         paint.anti_alias = true;
-        pm.stroke_path(&path, &paint, &stroke_of(width.max(6.0)), Transform::identity(), None);
+        pm.stroke_path(&path, &paint, &stroke_of(width.max(MIN_HIGHLIGHT_WIDTH)), Transform::identity(), None);
     }
 }
 
@@ -273,25 +273,16 @@ fn draw_highlight(pm: &mut Pixmap, points: &[Pos2], color: [u8; 4], width: f32) 
 // ---------------------------------------------------------------------------
 
 fn draw_text(pm: &mut Pixmap, font: &FontRef<'static>, pos: Pos2, text: &str, color: [u8; 4], size: f32) {
-    let scaled = font.as_scaled(PxScale::from(size.max(1.0)));
-    let sf = scaled.scale_factor();
-    let line_height = (scaled.ascent() - scaled.descent() + scaled.line_gap()).max(size * 1.2);
+    let sf = font.as_scaled(PxScale::from(size.max(1.0))).scale_factor();
+    let layout = layout_text(font, pos, text, size);
     let paint = paint_rgba(color);
-
-    let mut baseline = pos.y + scaled.ascent();
-    for line in text.split('\n') {
-        let mut pen_x = pos.x;
-        for ch in line.chars() {
-            let gid = font.glyph_id(ch);
-            if let Some(outline) = font.outline(gid) {
-                if let Some(path) = outline_to_path(&outline, pen_x, baseline, sf.horizontal, sf.vertical)
-                {
-                    pm.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
-                }
+    for g in &layout.glyphs {
+        if let Some(outline) = font.outline(g.id) {
+            let baseline = g.top + layout.ascent;
+            if let Some(path) = outline_to_path(&outline, g.x, baseline, sf.horizontal, sf.vertical) {
+                pm.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
             }
-            pen_x += scaled.h_advance(gid);
         }
-        baseline += line_height;
     }
 }
 

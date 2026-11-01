@@ -1,4 +1,4 @@
-use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
+use ab_glyph::{Font, FontRef, GlyphId, PxScale, ScaleFont};
 use egui::{vec2, Pos2, Rect, Vec2};
 
 /// The annotation tools available in the toolbar.
@@ -25,20 +25,11 @@ impl Tool {
         Tool::Spot,
         Tool::Text,
     ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Tool::Select => "Select",
-            Tool::Arrow => "Arrow",
-            Tool::Ellipse => "Ellipse",
-            Tool::Rect => "Rect",
-            Tool::Highlight => "Highlight",
-            Tool::Blur => "Blur",
-            Tool::Spot => "Spot",
-            Tool::Text => "Text",
-        }
-    }
 }
+
+/// Narrowest highlighter stroke, in image pixels. Thinner strokes would read
+/// as a line rather than a highlight.
+pub const MIN_HIGHLIGHT_WIDTH: f32 = 6.0;
 
 /// A corner resize handle of the selection box.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -78,7 +69,7 @@ impl Handle {
 const MIN_RESIZE_EXTENT: f32 = 2.0;
 
 /// A committed annotation. All coordinates are in image pixel space.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum Annotation {
     Arrow {
         from: Pos2,
@@ -390,21 +381,51 @@ fn dist_to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
     (p - (a + ab * t)).length()
 }
 
-fn text_bounds(font: &FontRef<'static>, pos: Pos2, text: &str, size: f32) -> Rect {
+/// A glyph placed by [`layout_text`], in image pixels.
+pub struct PlacedGlyph {
+    pub ch: char,
+    pub id: GlyphId,
+    /// Left edge of the glyph's advance.
+    pub x: f32,
+    /// Top of the glyph's line; the baseline is `ascent` below it.
+    pub top: f32,
+}
+
+/// Glyph positions for a text annotation. Export, hit-testing and the canvas
+/// overlay all use this, so they cannot disagree about where text sits.
+pub struct TextLayout {
+    pub glyphs: Vec<PlacedGlyph>,
+    pub ascent: f32,
+    pub size: Vec2,
+}
+
+pub fn layout_text(font: &FontRef<'static>, pos: Pos2, text: &str, size: f32) -> TextLayout {
     let scaled = font.as_scaled(PxScale::from(size.max(1.0)));
     let line_height = (scaled.ascent() - scaled.descent() + scaled.line_gap()).max(size * 1.2);
+    let mut glyphs = Vec::with_capacity(text.len());
     let mut width = 0.0_f32;
+    let mut top = pos.y;
     let mut lines = 0;
     for line in text.split('\n') {
-        let mut w = 0.0_f32;
+        let mut pen_x = pos.x;
         for ch in line.chars() {
-            w += scaled.h_advance(font.glyph_id(ch));
+            let id = font.glyph_id(ch);
+            glyphs.push(PlacedGlyph { ch, id, x: pen_x, top });
+            pen_x += scaled.h_advance(id);
         }
-        width = width.max(w);
+        width = width.max(pen_x - pos.x);
+        top += line_height;
         lines += 1;
     }
-    let height = line_height * lines.max(1) as f32;
-    Rect::from_min_size(pos, vec2(width, height))
+    TextLayout {
+        glyphs,
+        ascent: scaled.ascent(),
+        size: vec2(width, line_height * lines.max(1) as f32),
+    }
+}
+
+fn text_bounds(font: &FontRef<'static>, pos: Pos2, text: &str, size: f32) -> Rect {
+    Rect::from_min_size(pos, layout_text(font, pos, text, size).size)
 }
 
 #[cfg(test)]
