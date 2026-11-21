@@ -48,13 +48,33 @@ You need a recent stable [Rust toolchain](https://rustup.rs).
 cargo run --release
 ```
 
-### macOS app bundle
+### Packaging (platform-specific)
 
-To build `Notely.app` and a `.dmg`, install [cargo-bundle](https://github.com/burtonageo/cargo-bundle) and then run the packaging script:
+Run the dispatcher script, which automatically selects the script for your current OS:
+
+```sh
+./scripts/package.sh
+```
+
+Or invoke a platform-specific script directly:
+
+#### Linux (AppImage)
+
+Requires [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy) (with the built-in AppImage output plugin) and optionally ImageMagick (`magick`/`convert`) to resize the icon:
+
+```sh
+./scripts/package-linux.sh
+```
+
+The output goes to `target/release/bundle/appimage/Notely-<version>-<arch>.AppImage`.
+
+#### macOS (`.app` and `.dmg`)
+
+Install [cargo-bundle](https://github.com/burtonageo/cargo-bundle) and run:
 
 ```sh
 cargo install cargo-bundle
-./scripts/package.sh
+./scripts/package-macos.sh
 ```
 
 The script ad-hoc signs the app. The output goes to `target/release/bundle/osx/Notely.app` and `target/release/bundle/dmg/Notely.dmg`.
@@ -91,7 +111,8 @@ src/
   macos_open.rs   handles files opened from the Dock or Finder (macOS)
 examples/
   make_icon.rs    generates the app icon
-scripts/          packaging and icon scripts
+scripts/          platform-specific packaging and icon scripts
+linux/            desktop entry for Linux AppImage packaging
 macos/            Info.plist additions (image document types)
 ```
 

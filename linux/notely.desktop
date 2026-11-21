@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Notely
+GenericName=Image Annotator
+Comment=Image annotation made simple - annotate any screenshot
+Exec=notely
+Icon=notely
+Terminal=false
+Categories=Graphics;2DGraphics;RasterGraphics;
+StartupWMClass=Notely
